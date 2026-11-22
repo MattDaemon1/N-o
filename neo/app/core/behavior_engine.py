@@ -4,8 +4,14 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from app.core.state_manager import BehaviorMode
+from app.core.text_utils import normalize_text as _normalize_text
+
+if TYPE_CHECKING:
+    from app.config.defaults import NeoConfig
+    from app.core.state_manager import StateManager
 
 # Common Whisper noise artifacts on silence/ambient sound
 NOISE_ARTIFACTS = {
@@ -40,8 +46,7 @@ class BehaviorEngine:
 
     @staticmethod
     def normalize_text(text: str) -> str:
-        cleaned = re.sub(r"[^\w\sàâäéèêëîïôöùûüç]", " ", text.lower())
-        return re.sub(r"\s+", " ", cleaned).strip()
+        return _normalize_text(text)
 
     def is_empty_or_noise(self, transcript: str, stt_uncertain: bool = False) -> bool:
         norm = self.normalize_text(transcript)
@@ -290,4 +295,69 @@ class BehaviorEngine:
             "Proposition pédagogique validée par le moteur comportemental.",
             clamped_resp,
             clamped_note,
+        )
+
+    @property
+    def behavior(self) -> "BehaviorEngine":
+        """Temporary compatibility accessor for callers migrating from DecisionEngine."""
+        return self
+
+    @staticmethod
+    def resolve_mode(config: "NeoConfig") -> BehaviorMode:
+        return BehaviorMode(config.mode)
+
+    def pre_check(
+        self,
+        *,
+        config: "NeoConfig",
+        state: "StateManager",
+        transcript: str,
+        stt_uncertain: bool = False,
+        explicit_trainer_request: bool = False,
+    ) -> PreCheckResult:
+        mode = self.resolve_mode(config)
+        cooldown = state.cooldown_remaining(config.cooldown_seconds)
+        return self.evaluate_pre_llm(
+            mode=mode,
+            transcript=transcript,
+            stt_uncertain=stt_uncertain,
+            explicit_trainer_request=explicit_trainer_request,
+            cooldown_remaining=cooldown,
+            asked_questions=state.get_asked_questions(),
+            recent_answers=state.get_recent_answers(),
+        )
+
+    def post_check(
+        self,
+        *,
+        config: "NeoConfig",
+        state: "StateManager",
+        explicit_trainer_request: bool,
+        should_intervene: bool,
+        event_type: str,
+        is_off_topic: bool,
+        is_uncertain: bool,
+        confidence: float,
+        learner_response: str,
+        private_trainer_note: str,
+        epoch_before: int,
+    ) -> PostCheckResult:
+        mode = self.resolve_mode(config)
+        cooldown = state.cooldown_remaining(config.cooldown_seconds)
+        return self.evaluate_post_llm(
+            mode=mode,
+            explicit_trainer_request=explicit_trainer_request,
+            cooldown_remaining=cooldown,
+            should_intervene=should_intervene,
+            event_type=event_type,
+            is_off_topic=is_off_topic,
+            is_uncertain=is_uncertain,
+            confidence=confidence,
+            learner_response=learner_response,
+            private_trainer_note=private_trainer_note,
+            recent_answers=state.get_recent_answers(),
+            max_sentences=config.max_response_sentences,
+            max_chars=config.max_response_chars,
+            epoch_before=epoch_before,
+            epoch_after=state.current_interruption_epoch(),
         )

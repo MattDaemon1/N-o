@@ -54,18 +54,7 @@ class SessionController:
                 pass
 
     def _settle_non_off_state(self) -> NeoState:
-        if self.state_manager.active_proposal is not None:
-            self.state_manager.set_state(NeoState.PROPOSITION)
-            return NeoState.PROPOSITION
-        if (
-            self.state_manager.listening_enabled
-            and self.state_manager.session_active
-            and not self.state_manager.session_paused
-        ):
-            self.state_manager.set_state(NeoState.ECOUTE)
-            return NeoState.ECOUTE
-        self.state_manager.set_state(NeoState.EN_VEILLE)
-        return NeoState.EN_VEILLE
+        return self.state_manager.settle_state(mode=self.config_manager.config.mode)
 
     def start_session(self, enable_listening: bool = True) -> NeoState:
         cfg = self.config_manager.config
@@ -130,10 +119,7 @@ class SessionController:
             except Exception:
                 pass
 
-        if self.config_manager.config.mode == BehaviorMode.OFF.value:
-            self.state_manager.set_state(NeoState.OFF)
-        else:
-            self.state_manager.set_state(NeoState.EN_VEILLE)
+        self.state_manager.settle_state(mode=self.config_manager.config.mode)
 
         self.event_manager.add(
             kind="system",
@@ -206,10 +192,10 @@ class SessionController:
         self.state_manager.audio_level = 0.0
         if self._stop_audio_cb is not None:
             self._stop_audio_cb()
-        if self.config_manager.config.mode == BehaviorMode.OFF.value:
-            self.state_manager.set_state(NeoState.OFF)
-        elif self.state_manager.state not in (NeoState.ERREUR, NeoState.PROPOSITION):
-            self.state_manager.set_state(NeoState.EN_VEILLE)
+        self.state_manager.settle_state(
+            mode=self.config_manager.config.mode,
+            preserve_states=(NeoState.ERREUR, NeoState.PROPOSITION),
+        )
 
     def interrupt(self, reason: str = "Interruption immédiate par le formateur.") -> NeoState:
         self._stop_tts(reason)
@@ -218,13 +204,7 @@ class SessionController:
             self._active_llm_task.cancel()
         self._active_llm_task = None
 
-        mode = self.config_manager.config.mode
-        if mode == BehaviorMode.OFF.value:
-            self.state_manager.set_state(NeoState.OFF)
-        elif self.state_manager.listening_enabled and self.state_manager.session_active:
-            self.state_manager.set_state(NeoState.ECOUTE)
-        else:
-            self.state_manager.set_state(NeoState.EN_VEILLE)
+        self.state_manager.settle_state(mode=self.config_manager.config.mode)
 
         self.event_manager.add(
             kind="system",

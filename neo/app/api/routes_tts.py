@@ -40,7 +40,11 @@ async def set_vocal_mode(request: Request, body: VocalModePayload) -> dict[str, 
     if body.vocal_mode == VocalMode.SILENCIEUX:
         rt.tts_service.interrupt("Passage en mode vocal SILENCIEUX.")
     rt.config_manager.update({"vocal_mode": body.vocal_mode.value})
-    return {"ok": True, "vocal_mode": body.vocal_mode.value, "status": rt.tts_service.get_status()}
+    return {
+        "ok": True,
+        "vocal_mode": body.vocal_mode.value,
+        "status": rt.tts_service.get_status(refresh_inventory=False),
+    }
 
 
 @router.post("/stop")
@@ -53,7 +57,7 @@ async def stop_voice_immediately(request: Request) -> dict[str, Any]:
         "interrupted": interrupted,
         "mic_active": rt.state_manager.mic_active,
         "listening_enabled": rt.state_manager.listening_enabled,
-        "tts": rt.tts_service.get_status(),
+        "tts": rt.tts_service.get_status(refresh_inventory=False),
     }
 
 

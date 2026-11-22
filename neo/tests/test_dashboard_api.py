@@ -143,3 +143,36 @@ def test_tts_api_endpoints_and_mode_switch_preserves_proposal(tmp_path: Path):
         assert mode_res.status_code == 200
         assert mode_res.json()["neo_state"] == NeoState.PROPOSITION.value
         assert rt.state_manager.active_proposal is not None
+
+
+def test_dashboard_polling_caches_inventory_and_explicit_diagnostics_refreshes(tmp_path: Path):
+    cfg_path = tmp_path / "dashboard_config.json"
+    app = create_app(config_path=cfg_path)
+    rt = app.state.runtime
+
+    with (
+        patch(
+            "app.services.diagnostics_service.AudioCapture.list_devices",
+            return_value=([], None),
+        ) as dev_mock,
+        patch.object(rt.stt, "list_installed_models", return_value=["tiny"]) as stt_mock,
+        patch.object(rt.tts_service.voice_manager, "list_voices", return_value=[]) as voice_mock,
+        patch.object(rt.ollama_client, "list_models", AsyncMock(return_value=(False, [], None))),
+    ):
+        with TestClient(app) as client:
+            for _ in range(4):
+                res = client.get("/api/dashboard/state")
+                assert res.status_code == 200
+                assert res.json()["stt"]["installed_models"] == ["tiny"]
+
+            assert dev_mock.call_count == 1
+            assert stt_mock.call_count == 1
+            assert voice_mock.call_count == 1
+
+            # Explicit diagnostic endpoint always refreshes immediately
+            diag_res = client.get("/api/diagnostics")
+            assert diag_res.status_code == 200
+            assert dev_mock.call_count == 2
+            assert stt_mock.call_count == 2
+            assert voice_mock.call_count == 2
+

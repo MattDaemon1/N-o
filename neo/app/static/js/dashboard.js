@@ -5,6 +5,9 @@
 
   let latestState = null;
   let activeView = "cockpit";
+  let pollInFlight = false;
+  let pollFollowUp = false;
+  let pollTimer = null;
 
   async function api(url, method = "GET", body = null) {
     const opts = { method, headers: {} };
@@ -377,12 +380,45 @@
       .join("");
   }
 
-  async function pollState() {
+  async function pollState(isBackground = false) {
+    const background = isBackground === true;
+    if (background && document.hidden) {
+      return;
+    }
+    if (pollInFlight) {
+      if (!background) {
+        pollFollowUp = true;
+      }
+      return;
+    }
+    pollInFlight = true;
     try {
       const state = await api("/api/dashboard/state");
       renderState(state);
     } catch (err) {
       showAlert(err.message);
+    } finally {
+      pollInFlight = false;
+      if (pollFollowUp) {
+        pollFollowUp = false;
+        pollState(false);
+      }
+    }
+  }
+
+  function startPolling() {
+    if (pollTimer !== null) {
+      return;
+    }
+    pollTimer = setInterval(() => {
+      pollState(true);
+    }, 1200);
+  }
+
+  function stopPolling() {
+    if (pollTimer !== null) {
+      clearInterval(pollTimer);
+      pollTimer = null;
     }
   }
 
@@ -900,9 +936,20 @@
     });
   }
 
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      stopPolling();
+    } else {
+      pollState(false);
+      startPolling();
+    }
+  });
+
   document.addEventListener("DOMContentLoaded", () => {
     bindEvents();
-    pollState();
-    setInterval(pollState, 1200);
+    if (!document.hidden) {
+      pollState(false);
+      startPolling();
+    }
   });
 })();

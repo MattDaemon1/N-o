@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any
 
 from app.config.config_manager import ConfigManager
@@ -36,27 +38,57 @@ class TTSService:
         self.engine = engine or PiperTTSEngine(voice_manager=self.voice_manager)
         self.worker = worker or SpeakerWorker(self.engine)
         self.worker.set_auto_unload_seconds(self.config_manager.config.tts_auto_unload_seconds)
+        self._inventory_lock = threading.RLock()
+        self._inventory_ttl_seconds = 12.0
+        self._inventory_cached_at = 0.0
+        self._cached_voice_key = ""
+        self._cached_backend: dict[str, Any] = {}
+        self._cached_voices: list[Any] = []
+        self._cached_selected_ok = False
+        self._cached_selected_err: str | None = None
+        self._cached_installed_ids: list[str] = []
+
+    def invalidate_inventory_cache(self) -> None:
+        with self._inventory_lock:
+            self._inventory_cached_at = 0.0
 
     def _settle_after_speech(self) -> None:
-        cfg = self.config_manager.config
-        if cfg.mode == BehaviorMode.OFF.value:
-            self.state_manager.set_state(NeoState.OFF)
-            return
-        if self.state_manager.state == NeoState.PAROLE_DETECTEE:
-            return
-        if self.state_manager.active_proposal is not None:
-            self.state_manager.set_state(NeoState.PROPOSITION)
-        elif self.state_manager.listening_enabled and self.state_manager.session_active:
-            self.state_manager.set_state(NeoState.ECOUTE)
-        else:
-            self.state_manager.set_state(NeoState.EN_VEILLE)
+        self.state_manager.settle_state(
+            mode=self.config_manager.config.mode,
+            preserve_states=(NeoState.PAROLE_DETECTEE,),
+        )
 
-    def get_status(self) -> dict[str, Any]:
+    def get_status(self, refresh_inventory: bool = True) -> dict[str, Any]:
         cfg = self.config_manager.config
-        backend = self.engine.get_backend_info()
-        voices = self.voice_manager.list_voices()
-        selected_ok, selected_err, _ = self.voice_manager.validate_voice(cfg.tts_voice)
-        installed_ids = [v.voice_id for v in voices if v.valid]
+        now = time.monotonic()
+        with self._inventory_lock:
+            cache_expired = (
+                self._inventory_cached_at == 0.0
+                or (now - self._inventory_cached_at) >= self._inventory_ttl_seconds
+                or self._cached_voice_key != cfg.tts_voice
+            )
+            if refresh_inventory or cache_expired:
+                backend = self.engine.get_backend_info()
+                voices = self.voice_manager.list_voices()
+                selected_ok, selected_err, _ = self.voice_manager.validate_voice(cfg.tts_voice)
+                installed_ids = [v.voice_id for v in voices if v.valid]
+
+                self._cached_backend = backend
+                self._cached_voices = voices
+                self._cached_selected_ok = selected_ok
+                self._cached_selected_err = selected_err
+                self._cached_installed_ids = installed_ids
+                self._cached_voice_key = cfg.tts_voice
+                self._inventory_cached_at = now
+            else:
+                backend = {
+                    **self._cached_backend,
+                    "model_loaded": self.engine.is_loaded(),
+                }
+                voices = self._cached_voices
+                selected_ok = self._cached_selected_ok
+                selected_err = self._cached_selected_err
+                installed_ids = self._cached_installed_ids
 
         if not cfg.tts_enabled:
             effective_state = "INACTIF"

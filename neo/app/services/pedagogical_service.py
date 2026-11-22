@@ -11,7 +11,7 @@ from app.ai.ollama_client import OllamaClient
 from app.ai.prompt_manager import SYSTEM_PROMPT, PromptManager
 from app.ai.response_parser import ParsedPedagogicalResponse, ResponseParser
 from app.config.config_manager import ConfigManager
-from app.core.decision_engine import DecisionEngine
+from app.core.behavior_engine import BehaviorEngine
 from app.core.event_manager import EventManager
 from app.core.session_controller import SessionController
 from app.core.state_manager import BehaviorMode, NeoState, ProposalRecord, StateManager
@@ -103,7 +103,7 @@ SIMULATION_SCENARIOS: dict[str, dict[str, Any]] = {
 
 
 class PedagogicalService:
-    """Runs transcript evaluation through DecisionEngine and local Ollama LLM."""
+    """Runs transcript evaluation through BehaviorEngine and local Ollama LLM."""
 
     def __init__(
         self,
@@ -111,7 +111,8 @@ class PedagogicalService:
         config_manager: ConfigManager,
         state_manager: StateManager,
         event_manager: EventManager,
-        decision_engine: DecisionEngine,
+        behavior_engine: BehaviorEngine | None = None,
+        decision_engine: BehaviorEngine | None = None,
         session_controller: SessionController,
         ollama_client: OllamaClient,
         model_manager: ModelManager,
@@ -120,7 +121,7 @@ class PedagogicalService:
         self.config_manager = config_manager
         self.state_manager = state_manager
         self.event_manager = event_manager
-        self.decision_engine = decision_engine
+        self.behavior_engine = behavior_engine or decision_engine or BehaviorEngine()
         self.session_controller = session_controller
         self.ollama = ollama_client
         self.model_manager = model_manager
@@ -128,15 +129,7 @@ class PedagogicalService:
         self._proposal_counter = 0
 
     def _settle_state(self) -> None:
-        cfg = self.config_manager.config
-        if cfg.mode == BehaviorMode.OFF.value:
-            self.state_manager.set_state(NeoState.OFF)
-        elif self.state_manager.active_proposal is not None:
-            self.state_manager.set_state(NeoState.PROPOSITION)
-        elif self.state_manager.listening_enabled and self.state_manager.session_active:
-            self.state_manager.set_state(NeoState.ECOUTE)
-        else:
-            self.state_manager.set_state(NeoState.EN_VEILLE)
+        self.state_manager.settle_state(mode=self.config_manager.config.mode)
 
     async def process_transcript(
         self,
@@ -167,7 +160,7 @@ class PedagogicalService:
             self._settle_state()
             return {"intervened": False, "decision": reason, "proposal": None}
 
-        pre = self.decision_engine.pre_check(
+        pre = self.behavior_engine.pre_check(
             config=cfg,
             state=self.state_manager,
             transcript=transcript,
@@ -188,7 +181,7 @@ class PedagogicalService:
             self._settle_state()
             return {"intervened": False, "decision": pre.reason, "proposal": None}
 
-        is_explicit = self.decision_engine.behavior.is_explicit_trainer_solicitation(
+        is_explicit = self.behavior_engine.is_explicit_trainer_solicitation(
             transcript, explicit_trainer_request
         )
         self.state_manager.set_state(NeoState.ANALYSE)
@@ -217,7 +210,7 @@ class PedagogicalService:
         if pre.is_already_answered and not is_explicit:
             parsed.should_intervene = False
 
-        post = self.decision_engine.post_check(
+        post = self.behavior_engine.post_check(
             config=cfg,
             state=self.state_manager,
             explicit_trainer_request=is_explicit,

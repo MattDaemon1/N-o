@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import platform
 import sys
+import threading
+import time
 from typing import Any
 
 from app.ai.model_manager import ModelManager
@@ -33,6 +35,7 @@ class DiagnosticsService:
         segment_queue: SegmentQueueManager,
         stt: FasterWhisperSTT,
         tts_service: Any | None = None,
+        inventory_ttl_seconds: float = 12.0,
     ) -> None:
         self.config_manager = config_manager
         self.state_manager = state_manager
@@ -41,6 +44,19 @@ class DiagnosticsService:
         self.segment_queue = segment_queue
         self.stt = stt
         self.tts_service = tts_service
+
+        self._inventory_lock = threading.RLock()
+        self._inventory_ttl_seconds = max(0.0, float(inventory_ttl_seconds))
+        self._inventory_cached_at: float = 0.0
+        self._cached_installed_stt: list[str] = []
+        self._cached_devices: list[Any] = []
+        self._cached_mic_err: str | None = None
+
+    def invalidate_inventory_cache(self) -> None:
+        with self._inventory_lock:
+            self._inventory_cached_at = 0.0
+        if self.tts_service is not None and hasattr(self.tts_service, "invalidate_inventory_cache"):
+            self.tts_service.invalidate_inventory_cache()
 
     def _system_resources(self) -> dict[str, Any]:
         cpu_percent: float | None = None
@@ -67,7 +83,28 @@ class DiagnosticsService:
             "ram_percent": ram_percent,
         }
 
-    async def snapshot(self, refresh_ollama: bool = False) -> dict[str, Any]:
+    def _get_inventory(self, *, force_refresh: bool) -> tuple[list[str], list[Any], str | None]:
+        now = time.monotonic()
+        with self._inventory_lock:
+            expired = (
+                self._inventory_cached_at == 0.0
+                or (now - self._inventory_cached_at) >= self._inventory_ttl_seconds
+            )
+            if force_refresh or expired:
+                self._cached_installed_stt = self.stt.list_installed_models()
+                self._cached_devices, self._cached_mic_err = AudioCapture.list_devices()
+                self._inventory_cached_at = now
+            return (
+                list(self._cached_installed_stt),
+                list(self._cached_devices),
+                self._cached_mic_err,
+            )
+
+    async def snapshot(
+        self,
+        refresh_ollama: bool = False,
+        refresh_inventory: bool = False,
+    ) -> dict[str, Any]:
         cfg = self.config_manager.config
         if refresh_ollama:
             ollama_info = await self.model_manager.refresh()
@@ -80,9 +117,11 @@ class DiagnosticsService:
                 "error": self.model_manager.last_error,
             }
 
-        installed_stt = self.stt.list_installed_models()
-        devices, mic_err = AudioCapture.list_devices()
-        tts_info = self.tts_service.get_status() if self.tts_service is not None else {}
+        installed_stt, devices, mic_err = self._get_inventory(force_refresh=refresh_inventory)
+        if self.tts_service is not None:
+            tts_info = self.tts_service.get_status(refresh_inventory=refresh_inventory)
+        else:
+            tts_info = {}
 
         return {
             "app_version": APP_VERSION,
@@ -124,7 +163,7 @@ class DiagnosticsService:
 
     async def run_global_check(self) -> dict[str, Any]:
         """Performs a read-only check across config, Ollama, microphone, local STT, and local TTS."""
-        snap = await self.snapshot(refresh_ollama=True)
+        snap = await self.snapshot(refresh_ollama=True, refresh_inventory=True)
         tts_snap = snap.get("tts") or {}
         tts_backend = tts_snap.get("backend") or {}
         tts_enabled = bool(tts_snap.get("tts_enabled"))

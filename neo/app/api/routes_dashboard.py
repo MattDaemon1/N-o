@@ -26,7 +26,10 @@ async def get_dashboard_state(request: Request) -> dict[str, Any]:
     rt = request.app.state.runtime
     cfg = rt.config_manager.config
     st = rt.state_manager
-    snap = await rt.diagnostics_service.snapshot(refresh_ollama=False)
+    snap = await rt.diagnostics_service.snapshot(
+        refresh_ollama=False,
+        refresh_inventory=False,
+    )
 
     return {
         "neo_state": st.state.value,
@@ -73,7 +76,10 @@ async def get_dashboard_state(request: Request) -> dict[str, Any]:
 @router.get("/api/diagnostics")
 async def get_diagnostics(request: Request) -> dict[str, Any]:
     rt = request.app.state.runtime
-    return await rt.diagnostics_service.snapshot(refresh_ollama=True)
+    return await rt.diagnostics_service.snapshot(
+        refresh_ollama=True,
+        refresh_inventory=True,
+    )
 
 
 @router.post("/api/diagnostics/run")

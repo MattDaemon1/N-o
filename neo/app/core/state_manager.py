@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import re
 import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Literal
+
+from app.core.text_utils import normalize_text
 
 
 class NeoState(str, Enum):
@@ -132,6 +133,31 @@ class StateManager:
             elif state != NeoState.ERREUR:
                 self.last_error = None
 
+    def settle_state(
+        self,
+        *,
+        mode: str,
+        preserve_states: tuple[NeoState, ...] = (),
+    ) -> NeoState:
+        """Atomically return NÉO to its canonical resting state without side effects."""
+        with self._lock:
+            if mode == BehaviorMode.OFF.value:
+                target = NeoState.OFF
+            elif preserve_states and self.state in preserve_states:
+                return self.state
+            elif self.active_proposal is not None:
+                target = NeoState.PROPOSITION
+            elif (
+                self.listening_enabled
+                and self.session_active
+                and not self.session_paused
+            ):
+                target = NeoState.ECOUTE
+            else:
+                target = NeoState.EN_VEILLE
+            self.set_state(target)
+            return target
+
     def set_tts_status(
         self,
         *,
@@ -150,8 +176,7 @@ class StateManager:
                 self.tts_last_error = None
 
     def record_tts_spoken(self, text: str) -> None:
-        norm = re.sub(r"[^\w\sàâäéèêëîïôöùûüç]", " ", text.lower())
-        norm = re.sub(r"\s+", " ", norm).strip()
+        norm = normalize_text(text)
         now = time.monotonic()
         with self._lock:
             self.tts_last_spoken_text = text
@@ -176,8 +201,7 @@ class StateManager:
         without blocking genuine learner questions or trainer interruptions."""
         raw = transcript.strip()
         lower_raw = raw.lower()
-        norm = re.sub(r"[^\w\sàâäéèêëîïôöùûüç]", " ", lower_raw)
-        norm = re.sub(r"\s+", " ", norm).strip()
+        norm = normalize_text(lower_raw)
         if len(norm) < 8:
             return False
 

@@ -28,6 +28,7 @@ class SttModelPayload(BaseModel):
 async def list_audio_devices(request: Request) -> dict[str, Any]:
     rt = request.app.state.runtime
     devices, err = AudioCapture.list_devices()
+    rt.diagnostics_service.invalidate_inventory_cache()
     cfg = rt.config_manager.config
     return {
         "devices": [d.to_dict() for d in devices],
@@ -46,6 +47,7 @@ async def select_audio_device(request: Request, body: SelectMicPayload) -> dict[
             "mic_device_name": body.device_name,
         }
     )
+    rt.diagnostics_service.invalidate_inventory_cache()
     if rt.state_manager.listening_enabled and rt.state_manager.session_active:
         rt.audio_pipeline.start()
     return {"ok": True, "selected_device_index": body.device_index}
@@ -75,6 +77,7 @@ async def test_audio_device(request: Request) -> dict[str, Any]:
 async def list_stt_models(request: Request) -> dict[str, Any]:
     rt = request.app.state.runtime
     installed = rt.stt.list_installed_models()
+    rt.diagnostics_service.invalidate_inventory_cache()
     cfg = rt.config_manager.config
     return {
         "supported": SUPPORTED_WHISPER_MODELS,
@@ -96,6 +99,7 @@ async def select_stt_model(request: Request, body: SttModelPayload) -> dict[str,
             "stt_compute_type": body.compute_type,
         }
     )
+    rt.diagnostics_service.invalidate_inventory_cache()
     return {
         "ok": True,
         "selected_model": body.model_name,
@@ -114,4 +118,5 @@ async def download_stt_model_explicitly(request: Request, body: SttModelPayload)
     )
     if ok:
         rt.config_manager.update({"stt_model": body.model_name})
+    rt.diagnostics_service.invalidate_inventory_cache()
     return {"ok": ok, "message": msg, "installed": rt.stt.list_installed_models()}

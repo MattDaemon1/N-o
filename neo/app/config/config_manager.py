@@ -40,6 +40,7 @@ class ConfigManager:
                 raw_text = self.config_path.read_text(encoding="utf-8")
                 data = json.loads(raw_text)
                 cfg = NeoConfig.model_validate(data)
+                self._config = cfg
                 return cfg
             except (OSError, json.JSONDecodeError, ValidationError) as exc:
                 backup_path = self.config_path.with_suffix(".corrupted.bak")
@@ -52,32 +53,33 @@ class ConfigManager:
                     f"Fichier de configuration corrompu ({exc}). "
                     "Configuration par défaut restaurée."
                 )
-                default_cfg = NeoConfig()
-                self.save(default_cfg)
-                return default_cfg
+                return self._write_validated(NeoConfig())
+
+    def _write_validated(self, validated: NeoConfig) -> NeoConfig:
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(validated.model_dump(), indent=2, ensure_ascii=False) + "\n"
+        tmp_path = self.config_path.with_name(f".{self.config_path.name}.tmp")
+        tmp_path.write_text(payload, encoding="utf-8")
+        os.replace(tmp_path, self.config_path)
+        self._config = validated
+        return self._config
 
     def save(self, config: NeoConfig) -> NeoConfig:
         with self._lock:
-            self.config_path.parent.mkdir(parents=True, exist_ok=True)
             validated = NeoConfig.model_validate(config.model_dump())
-            payload = json.dumps(validated.model_dump(), indent=2, ensure_ascii=False) + "\n"
-            tmp_path = self.config_path.with_name(f".{self.config_path.name}.tmp")
-            tmp_path.write_text(payload, encoding="utf-8")
-            os.replace(tmp_path, self.config_path)
-            self._config = validated
-            return self._config
+            return self._write_validated(validated)
 
     def update(self, patch: dict[str, Any]) -> NeoConfig:
         with self._lock:
             current = self._config.model_dump()
             merged = _deep_merge(current, patch)
             updated = NeoConfig.model_validate(merged)
-            return self.save(updated)
+            return self._write_validated(updated)
 
     def reset_defaults(self) -> NeoConfig:
         with self._lock:
             self.last_warning = None
-            return self.save(NeoConfig())
+            return self._write_validated(NeoConfig())
 
 
 def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:

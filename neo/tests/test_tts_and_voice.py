@@ -365,3 +365,91 @@ def test_real_piper_tts_if_installed():
     )
     assert audio.error is None
     assert len(audio.pcm_int16) > 1000
+
+
+def test_inventory_cache_avoids_repeated_disk_scans_and_keeps_live_state_fresh(tmp_path: Path):
+    from app.ai.model_manager import ModelManager
+    from app.ai.ollama_client import OllamaClient
+    from app.audio.stt import FasterWhisperSTT
+    from app.services.diagnostics_service import DiagnosticsService
+
+    cfg_mgr, state, events, vm, engine, svc = _make_tts_service(tmp_path)
+    try:
+        stt = FasterWhisperSTT(cache_dir=tmp_path / "hf")
+        ollama = OllamaClient("http://127.0.0.1:11434")
+        mm = ModelManager(cfg_mgr, ollama)
+        cap = AudioCapture()
+        sqm = SegmentQueueManager(max_pending=2, temp_dir=tmp_path / "wavs")
+        diag = DiagnosticsService(
+            config_manager=cfg_mgr,
+            state_manager=state,
+            model_manager=mm,
+            audio_capture=cap,
+            segment_queue=sqm,
+            stt=stt,
+            tts_service=svc,
+            inventory_ttl_seconds=60.0,
+        )
+
+        voice_scans = 0
+        stt_scans = 0
+        dev_scans = 0
+
+        orig_list_voices = vm.list_voices
+        orig_list_stt = stt.list_installed_models
+
+        def counted_voices():
+            nonlocal voice_scans
+            voice_scans += 1
+            return orig_list_voices()
+
+        def counted_stt():
+            nonlocal stt_scans
+            stt_scans += 1
+            return orig_list_stt()
+
+        def counted_devices():
+            nonlocal dev_scans
+            dev_scans += 1
+            return [], None
+
+        vm.list_voices = counted_voices  # type: ignore[method-assign]
+        stt.list_installed_models = counted_stt  # type: ignore[method-assign]
+        with patch.object(AudioCapture, "list_devices", staticmethod(counted_devices)):
+            # 1er appel : remplit le cache une seule fois
+            snap1 = asyncio.run(diag.snapshot(refresh_ollama=False, refresh_inventory=False))
+            assert voice_scans == 1
+            assert stt_scans == 1
+            assert dev_scans == 1
+
+            # Appels suivants de polling : zéro scan disque/PortAudio, données dynamiques à jour
+            state.mic_active = True
+            state.set_tts_status(tts_state="LECTURE", speaking=True)
+            cfg_mgr.update({"vocal_mode": "AUTONOME"})
+
+            for _ in range(5):
+                snap = asyncio.run(diag.snapshot(refresh_ollama=False, refresh_inventory=False))
+                assert snap["audio"]["mic_active"] is True
+                assert snap["tts"]["tts_state"] == "LECTURE"
+                assert snap["tts"]["speaking"] is True
+                assert snap["tts"]["vocal_mode"] == "AUTONOME"
+
+            assert voice_scans == 1
+            assert stt_scans == 1
+            assert dev_scans == 1
+
+            # Demande explicite (refresh_inventory=True) -> force le rafraîchissement immédiat
+            asyncio.run(diag.snapshot(refresh_ollama=False, refresh_inventory=True))
+            assert voice_scans == 2
+            assert stt_scans == 2
+            assert dev_scans == 2
+
+            # Invalidation explicite -> rafraîchit au prochain appel
+            diag.invalidate_inventory_cache()
+            asyncio.run(diag.snapshot(refresh_ollama=False, refresh_inventory=False))
+            assert voice_scans == 3
+            assert stt_scans == 3
+            assert dev_scans == 3
+    finally:
+        svc.worker.stop_worker()
+
