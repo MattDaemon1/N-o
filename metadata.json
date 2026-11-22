@@ -1,0 +1,6 @@
+{
+  "name": "NÉO — Cockpit d'assistance pédagogique",
+  "description": "Assistant pédagogique intelligent pour accompagner le formateur en temps réel : écoute, détection d'incompréhensions, reformulations et exemples contextuels.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

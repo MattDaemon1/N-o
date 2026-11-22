@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NÉO — Assistant formateur IA local</title>
+  <link rel="stylesheet" href="/static/css/dashboard.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar" aria-label="Navigation NÉO">
+      <div class="brand">
+        <span class="brand-title">NÉO</span>
+        <span class="brand-sub">Nouvel Équipier Opérationnel</span>
+      </div>
+
+      <nav class="nav-list" role="tablist">
+        <button class="nav-item active" data-view="cockpit" type="button">Cockpit</button>
+        <button class="nav-item" data-view="session" type="button">Session &amp; Contexte</button>
+        <button class="nav-item" data-view="audio" type="button">Audio &amp; STT</button>
+        <button class="nav-item" data-view="voice" type="button">Voix de NÉO</button>
+        <button class="nav-item" data-view="models" type="button">Modèles Ollama</button>
+        <button class="nav-item" data-view="simulation" type="button">Mode simulation</button>
+        <button class="nav-item" data-view="history" type="button">Historique</button>
+        <button class="nav-item" data-view="diagnostics" type="button">Diagnostic</button>
+        <button class="nav-item" data-view="settings" type="button">Configuration</button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="privacy-note">Local uniquement · 127.0.0.1</div>
+        <div id="mic-privacy-banner" class="mic-banner hidden">Microphone actif</div>
+      </div>
+    </aside>
+
+    <!-- Main Viewport -->
+    <div class="main-area">
+      <!-- Top Status & Controls Bar -->
+      <header class="topbar">
+        <div class="status-cluster">
+          <span class="label-muted">État :</span>
+          <span id="neo-state-badge" class="state-value">EN VEILLE</span>
+          <div id="listening-wave" class="wave hidden" aria-label="Écoute audio active">
+            <span></span><span></span><span></span><span></span><span></span>
+          </div>
+          <span class="sep">·</span>
+          <span class="label-muted">Mode :</span>
+          <select id="quick-mode-select" aria-label="Mode comportemental">
+            <option value="ACTIF">ACTIF</option>
+            <option value="PASSIF">PASSIF</option>
+            <option value="SUR_DEMANDE">SUR_DEMANDE</option>
+            <option value="OFF">OFF</option>
+          </select>
+          <span class="sep">·</span>
+          <span class="label-muted">Voix :</span>
+          <select id="quick-vocal-select" aria-label="Mode vocal de NÉO">
+            <option value="SILENCIEUX">SILENCIEUX</option>
+            <option value="ASSISTANT">ASSISTANT</option>
+            <option value="AUTONOME">AUTONOME</option>
+          </select>
+          <span class="sep">·</span>
+          <span id="cooldown-label" class="mono muted">Cooldown : 0 s</span>
+        </div>
+
+        <div class="control-cluster">
+          <button id="btn-start" class="btn btn-primary" type="button">Démarrer session</button>
+          <button id="btn-pause" class="btn" type="button">Pause</button>
+          <button id="btn-resume" class="btn" type="button">Reprendre</button>
+          <button id="btn-stop" class="btn" type="button">Arrêter</button>
+          <button id="btn-toggle-listen" class="btn" type="button">Écoute : Off</button>
+          <button id="btn-toggle-neo" class="btn" type="button">Désactiver NÉO</button>
+          <button id="btn-stop-voice" class="btn btn-stop-voice" type="button" title="Couper immédiatement la voix de NÉO">STOP VOIX</button>
+          <button id="btn-interrupt" class="btn btn-danger" type="button">Interrompre</button>
+        </div>
+      </header>
+
+      <div id="global-alert" class="alert hidden" role="alert"></div>
+
+      <!-- VIEW: COCKPIT -->
+      <main id="view-cockpit" class="view active">
+        <!-- System Indicators Row -->
+        <section class="indicators-grid" aria-label="Indicateurs système">
+          <div class="stat-card">
+            <div class="stat-label">Ollama local</div>
+            <div id="ind-ollama" class="stat-value">Vérification…</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Modèle LLM</div>
+            <div id="ind-model" class="stat-value mono">Aucun</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Microphone &amp; Niveau</div>
+            <div id="ind-mic" class="stat-value">Inactif</div>
+            <div class="meter-track"><div id="ind-audio-bar" class="meter-fill"></div></div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Modèle STT</div>
+            <div id="ind-stt" class="stat-value mono">small</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">CPU / RAM dispo</div>
+            <div id="ind-sys" class="stat-value mono">—</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Latence STT / LLM</div>
+            <div id="ind-latency" class="stat-value mono">0 ms / 0 ms</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Voix de NÉO (TTS)</div>
+            <div id="ind-tts" class="stat-value">INACTIF</div>
+          </div>
+        </section>
+
+        <!-- Two-Column Cockpit -->
+        <div class="cockpit-grid">
+          <!-- Left: Session Context + Recent Transcripts & Direct Command -->
+          <section class="panel">
+            <div class="panel-header">
+              <h2>Session &amp; Flux d'échanges</h2>
+              <span id="cockpit-session-title" class="muted">Session de formation</span>
+            </div>
+            <div class="panel-body">
+              <div id="cockpit-context-summary" class="context-line"></div>
+
+              <div id="cockpit-stream" class="stream-list">
+                <div class="empty-box">Aucun échange enregistré pour cette session.</div>
+              </div>
+
+              <form id="trainer-command-form" class="command-form">
+                <input
+                  id="trainer-command-input"
+                  type="text"
+                  placeholder="Solliciter NÉO directement (ex : Néo, donne un exemple concret)…"
+                  autocomplete="off"
+                />
+                <button class="btn btn-primary" type="submit">Envoyer</button>
+              </form>
+              <div class="quick-prompts">
+                <button class="btn btn-sm quick-cmd" data-hint="Reformulation" data-cmd="Néo, reformule la notion précédente simplement." type="button">Reformuler</button>
+                <button class="btn btn-sm quick-cmd" data-hint="Exemple concret" data-cmd="Néo, donne un exemple concret." type="button">Exemple concret</button>
+                <button class="btn btn-sm quick-cmd" data-hint="Analogie" data-cmd="Néo, propose une analogie simple." type="button">Analogie</button>
+                <button class="btn btn-sm quick-cmd" data-hint="Synthèse" data-cmd="Néo, fais une synthèse courte en 3 points." type="button">Synthèse</button>
+              </div>
+            </div>
+          </section>
+
+          <!-- Right: Proposal & Private/Learner Separation -->
+          <section class="panel">
+            <div class="panel-header">
+              <h2>Restitution &amp; Propositions</h2>
+              <span id="proposal-meta" class="mono muted">En attente</span>
+            </div>
+            <div class="panel-body">
+              <div id="proposal-container">
+                <div class="empty-box">
+                  NÉO reste silencieux tant qu'aucun besoin pédagogique pertinent n'est détecté.
+                </div>
+              </div>
+
+              <div class="subsection">
+                <h3>Affichage validé pour les apprenants</h3>
+                <div id="learner-broadcast-list" class="broadcast-list">
+                  <div class="muted small">Aucune réponse diffusée aux apprenants.</div>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+      </main>
+
+      <!-- VIEW: SESSION & CONTEXTE -->
+      <section id="view-session" class="view">
+        <div class="panel">
+          <div class="panel-header">
+            <h2>Contexte de la session de formation</h2>
+          </div>
+          <form id="session-context-form" class="panel-body form-grid">
+            <label>
+              <span>Nom de la formation</span>
+              <input id="ctx-title" type="text" required />
+            </label>
+            <label>
+              <span>Sujet du cours</span>
+              <input id="ctx-subject" type="text" placeholder="Ex : API REST, sécurité Web, gestion d'équipe…" />
+            </label>
+            <label>
+              <span>Niveau des apprenants</span>
+              <select id="ctx-level">
+                <option value="Débutant">Débutant</option>
+                <option value="Intermédiaire">Intermédiaire</option>
+                <option value="Avancé">Avancé</option>
+                <option value="Mixte">Mixte</option>
+              </select>
+            </label>
+            <label>
+              <span>Objectifs pédagogiques</span>
+              <textarea id="ctx-objectives" rows="3" placeholder="Objectifs clés transmis au modèle local…"></textarea>
+            </label>
+            <label>
+              <span>Instructions personnalisées pour NÉO</span>
+              <textarea id="ctx-instructions" rows="3" placeholder="Consignes particulières de posture, ton ou vocabulaire…"></textarea>
+            </label>
+            <div class="form-actions">
+              <button class="btn btn-primary" type="submit">Enregistrer le contexte</button>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <!-- VIEW: AUDIO & STT -->
+      <section id="view-audio" class="view">
+        <div class="two-col">
+          <div class="panel">
+            <div class="panel-header">
+              <h2>Microphone &amp; Capture CPU</h2>
+              <button id="btn-refresh-mics" class="btn btn-sm" type="button">Actualiser</button>
+            </div>
+            <div class="panel-body stack">
+              <label>
+                <span>Microphone sélectionné</span>
+                <select id="audio-device-select"></select>
+              </label>
+              <div class="row-actions">
+                <button id="btn-test-mic" class="btn" type="button">Tester le microphone (1,2 s)</button>
+                <span id="mic-test-result" class="mono muted"></span>
+              </div>
+              <div class="divider"></div>
+              <h3>Paramètres VAD &amp; Segmentation</h3>
+              <div class="form-grid compact">
+                <label>
+                  <span>Seuil d'énergie VAD</span>
+                  <input id="vad-threshold" type="number" step="0.002" min="0.002" max="0.5" />
+                </label>
+                <label>
+                  <span>Durée minimale parole (s)</span>
+                  <input id="vad-min-speech" type="number" step="0.1" min="0.2" max="3" />
+                </label>
+                <label>
+                  <span>Silence avant clôture (s)</span>
+                  <input id="vad-silence" type="number" step="0.1" min="0.4" max="4" />
+                </label>
+                <label>
+                  <span>Durée max segment (s)</span>
+                  <input id="vad-max-seg" type="number" step="1" min="4" max="45" />
+                </label>
+              </div>
+              <button id="btn-save-vad" class="btn btn-primary" type="button">Enregistrer paramètres audio</button>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-header">
+              <h2>Transcription locale Faster-Whisper</h2>
+            </div>
+            <div class="panel-body stack">
+              <p class="small muted">
+                Aucun modèle n'est téléchargé automatiquement au démarrage. Seuls les modèles explicitement installés sont utilisables hors ligne.
+              </p>
+              <label>
+                <span>Modèle STT sélectionné</span>
+                <select id="stt-model-select">
+                  <option value="tiny">tiny (ultra léger)</option>
+                  <option value="base">base (léger)</option>
+                  <option value="small">small (recommandé 8 Go RAM)</option>
+                  <option value="medium">medium (plus lourd)</option>
+                </select>
+              </label>
+              <div id="stt-installed-list" class="small mono muted">Modèles installés : —</div>
+              <div class="row-actions">
+                <button id="btn-save-stt" class="btn" type="button">Sélectionner ce modèle</button>
+                <button id="btn-download-stt" class="btn btn-primary" type="button">Installer explicitement ce modèle</button>
+              </div>
+              <div id="stt-action-status" class="small muted"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- VIEW: VOIX DE NÉO (TTS LOCAL PIPER) -->
+      <section id="view-voice" class="view">
+        <div class="two-col">
+          <div class="panel">
+            <div class="panel-header">
+              <h2>Voix de NÉO — Synthèse vocale locale (Piper)</h2>
+              <span id="tts-engine-state" class="mono small muted">INACTIF</span>
+            </div>
+            <div class="panel-body stack">
+              <div id="tts-status-summary" class="small">Vérification du moteur vocal…</div>
+
+              <label class="checkbox-row">
+                <input id="tts-enabled-checkbox" type="checkbox" />
+                <span>Activer la voix locale de NÉO (100 % hors ligne, CPU uniquement)</span>
+              </label>
+
+              <div class="form-grid compact">
+                <label>
+                  <span>Mode vocal</span>
+                  <select id="tts-vocal-mode-select">
+                    <option value="SILENCIEUX">SILENCIEUX (texte seul)</option>
+                    <option value="ASSISTANT">ASSISTANT (sur clic formateur)</option>
+                    <option value="AUTONOME">AUTONOME (intervention concise validée)</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Voix française sélectionnée</span>
+                  <select id="tts-voice-select"></select>
+                </label>
+                <label>
+                  <span>Vitesse de parole (<span id="tts-speed-val" class="mono">1.00</span>x)</span>
+                  <input id="tts-speed-range" type="range" min="0.65" max="1.5" step="0.05" />
+                </label>
+                <label>
+                  <span>Volume (<span id="tts-volume-val" class="mono">90</span> %)</span>
+                  <input id="tts-volume-range" type="range" min="0" max="1" step="0.05" />
+                </label>
+                <label>
+                  <span>Délai avant prise de parole autonome (ms)</span>
+                  <input id="tts-delay-ms" type="number" min="0" max="5000" step="100" />
+                </label>
+                <label>
+                  <span>Longueur max énoncé vocal (caractères)</span>
+                  <input id="tts-max-chars" type="number" min="100" max="800" step="20" />
+                </label>
+                <label>
+                  <span>Comportement si erreur TTS</span>
+                  <select id="tts-error-policy">
+                    <option value="silent_fallback">Mode silencieux discret (repli texte)</option>
+                    <option value="notify_error">Afficher une alerte dans le dashboard</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Déchargement RAM automatique (secondes)</span>
+                  <input id="tts-auto-unload" type="number" min="0" max="900" step="30" />
+                </label>
+              </div>
+
+              <div class="row-actions">
+                <button id="btn-save-tts" class="btn btn-primary" type="button">Enregistrer réglages voix</button>
+                <button id="btn-voice-panel-stop" class="btn btn-danger" type="button">Stopper la voix</button>
+                <button id="btn-unload-tts" class="btn" type="button">Libérer la RAM TTS</button>
+              </div>
+
+              <div class="divider"></div>
+              <h3>Tester la voix sélectionnée</h3>
+              <div class="command-form">
+                <input
+                  id="tts-test-text"
+                  type="text"
+                  value="Bonjour, je suis NÉO, votre assistant pédagogique local."
+                  placeholder="Texte de test à prononcer…"
+                />
+                <button id="btn-test-voice" class="btn" type="button">Tester la voix</button>
+              </div>
+              <div id="tts-action-status" class="small muted"></div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-header">
+              <h2>Modèles vocaux français (Piper ONNX)</h2>
+              <button id="btn-refresh-voices" class="btn btn-sm" type="button">Actualiser</button>
+            </div>
+            <div class="panel-body stack">
+              <p class="small muted">
+                Aucune voix n'est téléchargée au démarrage. Vous pouvez installer explicitement une voix depuis le catalogue ci-dessous ou déposer manuellement vos fichiers <code>.onnx</code> et <code>.onnx.json</code> dans <code>models/voices/</code>.
+              </p>
+              <div class="row-actions">
+                <button id="btn-download-voice" class="btn btn-primary" type="button">Installer la voix sélectionnée</button>
+                <button id="btn-delete-voice" class="btn" type="button">Désinstaller cette voix</button>
+              </div>
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>Voix</th>
+                      <th>Statut</th>
+                      <th>Taille</th>
+                      <th>Licence</th>
+                    </tr>
+                  </thead>
+                  <tbody id="voices-table-body">
+                    <tr><td colspan="4" class="muted">Chargement…</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- VIEW: MODÈLES OLLAMA -->
+      <section id="view-models" class="view">
+        <div class="panel">
+          <div class="panel-header">
+            <h2>Modèles Ollama installés localement</h2>
+            <button id="btn-refresh-models" class="btn btn-sm" type="button">Détecter les modèles</button>
+          </div>
+          <div class="panel-body stack">
+            <div id="ollama-status-line" class="small">Vérification d'Ollama…</div>
+
+            <div class="form-grid compact">
+              <label>
+                <span>Endpoint Ollama local</span>
+                <input id="ollama-url-input" type="text" />
+              </label>
+              <label>
+                <span>Modèle actif (détectés uniquement)</span>
+                <select id="ollama-model-select"></select>
+              </label>
+              <label>
+                <span>Température</span>
+                <input id="llm-temp" type="number" step="0.05" min="0" max="1.5" />
+              </label>
+              <label>
+                <span>Timeout LLM (s)</span>
+                <input id="llm-timeout" type="number" step="1" min="3" max="120" />
+              </label>
+              <label>
+                <span>Max phrases par réponse</span>
+                <input id="llm-max-sentences" type="number" min="1" max="8" />
+              </label>
+              <label class="checkbox-row">
+                <input id="ai-enabled-checkbox" type="checkbox" />
+                <span>Activer l'intelligence LLM Ollama</span>
+              </label>
+            </div>
+
+            <div class="row-actions">
+              <button id="btn-save-model-settings" class="btn btn-primary" type="button">Enregistrer</button>
+              <button id="btn-test-model" class="btn" type="button">Tester le modèle sélectionné</button>
+              <span id="model-test-result" class="mono small muted"></span>
+            </div>
+
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Modèle</th>
+                  <th>Taille</th>
+                  <th>Paramètres</th>
+                  <th>Quantification</th>
+                </tr>
+              </thead>
+              <tbody id="models-table-body">
+                <tr><td colspan="4" class="muted">Aucun modèle détecté.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- VIEW: SIMULATION -->
+      <section id="view-simulation" class="view">
+        <div class="panel">
+          <div class="panel-header">
+            <h2>Mode démonstration &amp; simulation (sans microphone)</h2>
+          </div>
+          <div class="panel-body stack">
+            <p class="small muted">
+              Seule l'entrée audio est simulée. Chaque scénario traverse le véritable moteur comportemental déterministe et utilise Ollama local s'il est actif. Tous les événements générés sont marqués <strong>SIMULATION</strong>.
+            </p>
+            <div id="simulation-grid" class="sim-grid"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- VIEW: HISTORIQUE -->
+      <section id="view-history" class="view">
+        <div class="panel">
+          <div class="panel-header">
+            <h2>Historique léger de session</h2>
+            <button id="btn-clear-history" class="btn btn-sm" type="button">Vider l'historique</button>
+          </div>
+          <div class="panel-body">
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Heure</th>
+                    <th>Origine</th>
+                    <th>Type</th>
+                    <th>Transcription</th>
+                    <th>Analyse</th>
+                    <th>Décision</th>
+                    <th>Proposition</th>
+                    <th>STT / LLM</th>
+                  </tr>
+                </thead>
+                <tbody id="history-table-body">
+                  <tr><td colspan="8" class="muted">Historique vide.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- VIEW: DIAGNOSTIC -->
+      <section id="view-diagnostics" class="view">
+        <div class="panel">
+          <div class="panel-header">
+            <h2>Diagnostic global &amp; monitoring</h2>
+            <button id="btn-run-diag" class="btn btn-primary btn-sm" type="button">Lancer le diagnostic global</button>
+          </div>
+          <div class="panel-body stack">
+            <div id="diag-checks" class="diag-list"></div>
+            <pre id="diag-json" class="diag-pre"></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- VIEW: CONFIGURATION -->
+      <section id="view-settings" class="view">
+        <div class="panel">
+          <div class="panel-header">
+            <h2>Configuration persistante (dashboard_config.json)</h2>
+            <button id="btn-reset-settings" class="btn btn-sm" type="button">Restaurer valeurs par défaut</button>
+          </div>
+          <form id="settings-form" class="panel-body form-grid">
+            <label>
+              <span>Cooldown entre interventions (secondes)</span>
+              <input id="cfg-cooldown" type="number" min="0" max="300" />
+            </label>
+            <label>
+              <span>Longueur maximale des réponses (caractères)</span>
+              <input id="cfg-max-chars" type="number" min="150" max="1500" />
+            </label>
+            <label>
+              <span>Timeout STT (secondes)</span>
+              <input id="cfg-stt-timeout" type="number" min="3" max="120" />
+            </label>
+            <label class="checkbox-row">
+              <input id="cfg-keep-wav" type="checkbox" />
+              <span>Conserver temporairement les WAV en mode diagnostic (décoché par défaut)</span>
+            </label>
+            <label class="checkbox-row">
+              <input id="cfg-persist-history" type="checkbox" />
+              <span>Autoriser le stockage local optionnel de l'historique</span>
+            </label>
+            <div class="form-actions">
+              <button class="btn btn-primary" type="submit">Sauvegarder la configuration</button>
+            </div>
+          </form>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script src="/static/js/dashboard.js"></script>
+</body>
+</html>
