@@ -53,6 +53,24 @@ class BehaviorEngine:
             return True
         return False
 
+    _STOPWORDS = {
+        "les", "des", "une", "est", "sont", "pas", "que", "qui", "sur", "par",
+        "dans", "avec", "pour", "entre", "mon", "ton", "son", "nos", "vos",
+        "ces", "cet", "cette", "mais", "donc", "car", "aux", "oui", "non",
+        "moi", "toi", "lui", "eux", "ici", "ont", "fait", "plus", "moins",
+        "tout", "tous", "toute", "coup", "quelle", "quel", "quels", "quelles",
+        "quoi", "comment", "pourquoi", "quand", "sans", "sous", "chez", "vers",
+        "aussi", "très", "bien", "alors", "tandis", "encore",
+    }
+
+    @classmethod
+    def _meaningful_tokens(cls, text: str) -> set[str]:
+        norm = cls.normalize_text(text)
+        return {
+            w for w in norm.split()
+            if len(w) >= 3 and w not in cls._STOPWORDS
+        }
+
     def detect_repetition(
         self,
         transcript: str,
@@ -60,14 +78,13 @@ class BehaviorEngine:
         recent_answers: list[str],
     ) -> tuple[bool, bool]:
         """Returns (is_repeated_question, is_already_answered)."""
-        norm = self.normalize_text(transcript)
-        tokens = {w for w in norm.split() if len(w) >= 4}
+        tokens = self._meaningful_tokens(transcript)
         if not tokens:
             return False, False
 
         is_repeated = False
         for prev_q in asked_questions:
-            prev_tokens = {w for w in self.normalize_text(prev_q).split() if len(w) >= 4}
+            prev_tokens = self._meaningful_tokens(prev_q)
             if not prev_tokens:
                 continue
             overlap = len(tokens & prev_tokens)
@@ -79,7 +96,7 @@ class BehaviorEngine:
         already_answered = False
         if is_repeated and recent_answers:
             for ans in recent_answers:
-                ans_tokens = {w for w in self.normalize_text(ans).split() if len(w) >= 4}
+                ans_tokens = self._meaningful_tokens(ans)
                 if len(tokens & ans_tokens) >= 2:
                     already_answered = True
                     break

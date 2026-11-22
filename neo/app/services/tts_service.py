@@ -186,16 +186,23 @@ class TTSService:
             clear_error=True,
         )
 
-        def _on_start(spoken_text: str) -> None:
+        def _on_start(job_id: int, spoken_text: str) -> None:
+            if job_id != self.worker.current_job_id():
+                return
             self.state_manager.set_tts_status(tts_state="SYNTHESE", speaking=True)
             if update_neo_state and self.config_manager.config.mode != BehaviorMode.OFF.value:
                 self.state_manager.set_state(NeoState.INTERVENTION)
 
-        def _on_playback(spoken_text: str) -> None:
+        def _on_playback(job_id: int, spoken_text: str) -> None:
+            if job_id != self.worker.current_job_id():
+                return
             self.state_manager.set_tts_status(tts_state="LECTURE", speaking=True)
             self.state_manager.record_tts_spoken(spoken_text)
 
-        def _on_finish(interrupted: bool, duration_ms: int, error: str | None) -> None:
+        def _on_finish(job_id: int, interrupted: bool, duration_ms: int, error: str | None) -> None:
+            self.state_manager.mark_tts_playback_ended()
+            if job_id != self.worker.current_job_id():
+                return
             self.state_manager.metrics.last_tts_ms = duration_ms
             if interrupted:
                 self.state_manager.set_tts_status(tts_state="INTERROMPU", speaking=False)
@@ -237,6 +244,7 @@ class TTSService:
         """Immediately stops TTS synthesis & playback WITHOUT touching microphone/VAD/STT."""
         was_busy = self.worker.interrupt()
         if was_busy or self.state_manager.tts_speaking:
+            self.state_manager.mark_tts_playback_ended()
             self.state_manager.metrics.tts_interrupted_count += 1
             self.state_manager.set_tts_status(tts_state="INTERROMPU", speaking=False)
             self.event_manager.add(kind="system", event_type="TTS_INTERRUPTION", decision=reason)

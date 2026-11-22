@@ -233,9 +233,7 @@ class PedagogicalService:
 
         self.state_manager.record_transcript_memory(speaker, transcript, parsed.event_type)
         if parsed.event_type in ("QUESTION", "INCOMPREHENSION", "CONFUSION", "REPETITION"):
-            self.state_manager.asked_questions.append(transcript)
-            if len(self.state_manager.asked_questions) > 20:
-                self.state_manager.asked_questions = self.state_manager.asked_questions[-20:]
+            self.state_manager.record_question(transcript)
 
         if not post.allow_proposal:
             self.state_manager.last_silence_reason = post.decision_reason
@@ -274,9 +272,7 @@ class PedagogicalService:
         if not is_explicit:
             self.state_manager.mark_intervention_now()
         if post.clamped_response:
-            self.state_manager.recent_answers.append(post.clamped_response)
-            if len(self.state_manager.recent_answers) > 15:
-                self.state_manager.recent_answers = self.state_manager.recent_answers[-15:]
+            self.state_manager.record_answer(post.clamped_response)
 
         self.event_manager.add(
             kind="proposal",
@@ -362,7 +358,7 @@ class PedagogicalService:
         user_prompt = PromptManager.build_analysis_prompt(
             config=cfg,
             transcript=transcript,
-            recent_history=self.state_manager.recent_transcripts,
+            recent_history=self.state_manager.get_recent_transcripts(),
             intervention_hint=intervention_hint,
             explicit_request=explicit_request,
             is_repeated=is_repeated,

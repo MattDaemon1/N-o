@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import os
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +33,7 @@ class FasterWhisperSTT:
     """CPU-friendly French STT wrapper with explicit model installation policy."""
 
     def __init__(self, cache_dir: Path | str | None = None) -> None:
+        self._model_lock = threading.RLock()
         self._model: Any = None
         self._loaded_model_name: str = ""
         self._loaded_compute_type: str = ""
@@ -60,46 +62,48 @@ class FasterWhisperSTT:
 
     def unload_model(self) -> None:
         """Releases Faster-Whisper model weights from RAM when idle or stopped."""
-        if self._model is not None:
-            self._model = None
-            self._loaded_model_name = ""
-            self._loaded_compute_type = ""
-            gc.collect()
+        with self._model_lock:
+            if self._model is not None:
+                self._model = None
+                self._loaded_model_name = ""
+                self._loaded_compute_type = ""
+                gc.collect()
 
     def load_local_model(self, model_name: str, compute_type: str = "int8") -> tuple[bool, str | None]:
         """Loads model ONLY from local cache (local_files_only=True). Never downloads silently."""
         if WhisperModel is None:
             return False, "faster-whisper n'est pas installé dans l'environnement Python."
 
-        if (
-            self._model is not None
-            and self._loaded_model_name == model_name
-            and self._loaded_compute_type == compute_type
-        ):
-            return True, None
+        with self._model_lock:
+            if (
+                self._model is not None
+                and self._loaded_model_name == model_name
+                and self._loaded_compute_type == compute_type
+            ):
+                return True, None
 
-        # Free previous model before loading a new one to preserve 8 GB RAM
-        if self._model is not None:
-            self.unload_model()
+            # Free previous model before loading a new one to preserve 8 GB RAM
+            if self._model is not None:
+                self.unload_model()
 
-        try:
-            self._model = WhisperModel(
-                model_name,
-                device="cpu",
-                compute_type=compute_type,
-                cpu_threads=2,
-                local_files_only=True,
-            )
-            self._loaded_model_name = model_name
-            self._loaded_compute_type = compute_type
-            return True, None
-        except Exception as exc:
-            self._model = None
-            return (
-                False,
-                f"Modèle STT '{model_name}' absent du cache local. "
-                f"Téléchargez-le explicitement depuis l'onglet Audio & STT ({exc}).",
-            )
+            try:
+                self._model = WhisperModel(
+                    model_name,
+                    device="cpu",
+                    compute_type=compute_type,
+                    cpu_threads=2,
+                    local_files_only=True,
+                )
+                self._loaded_model_name = model_name
+                self._loaded_compute_type = compute_type
+                return True, None
+            except Exception as exc:
+                self._model = None
+                return (
+                    False,
+                    f"Modèle STT '{model_name}' absent du cache local. "
+                    f"Téléchargez-le explicitement depuis l'onglet Audio & STT ({exc}).",
+                )
 
     def download_model_explicitly(self, model_name: str, compute_type: str = "int8") -> tuple[bool, str]:
         """Triggered ONLY upon explicit user button click."""
@@ -107,19 +111,22 @@ class FasterWhisperSTT:
             return False, "faster-whisper n'est pas installé."
         if model_name not in SUPPORTED_WHISPER_MODELS:
             return False, f"Modèle non pris en charge : {model_name}."
-        try:
-            self._model = WhisperModel(
-                model_name,
-                device="cpu",
-                compute_type=compute_type,
-                cpu_threads=2,
-                local_files_only=False,
-            )
-            self._loaded_model_name = model_name
-            self._loaded_compute_type = compute_type
-            return True, f"Modèle STT '{model_name}' installé et prêt."
-        except Exception as exc:
-            return False, f"Échec du téléchargement de '{model_name}' : {exc}"
+        with self._model_lock:
+            try:
+                if self._model is not None:
+                    self.unload_model()
+                self._model = WhisperModel(
+                    model_name,
+                    device="cpu",
+                    compute_type=compute_type,
+                    cpu_threads=2,
+                    local_files_only=False,
+                )
+                self._loaded_model_name = model_name
+                self._loaded_compute_type = compute_type
+                return True, f"Modèle STT '{model_name}' installé et prêt."
+            except Exception as exc:
+                return False, f"Échec du téléchargement de '{model_name}' : {exc}"
 
     def transcribe_wav(
         self,
@@ -130,55 +137,56 @@ class FasterWhisperSTT:
         language: str = "fr",
     ) -> TranscriptionResult:
         start = time.perf_counter()
-        ok, err = self.load_local_model(model_name, compute_type)
-        if not ok or self._model is None:
-            return TranscriptionResult(
-                text="",
-                is_empty=True,
-                is_uncertain=True,
-                avg_logprob=-99.0,
-                duration_ms=int((time.perf_counter() - start) * 1000),
-                error=err,
-            )
+        with self._model_lock:
+            ok, err = self.load_local_model(model_name, compute_type)
+            if not ok or self._model is None:
+                return TranscriptionResult(
+                    text="",
+                    is_empty=True,
+                    is_uncertain=True,
+                    avg_logprob=-99.0,
+                    duration_ms=int((time.perf_counter() - start) * 1000),
+                    error=err,
+                )
 
-        try:
-            segments, _info = self._model.transcribe(
-                str(wav_path),
-                language=language,
-                beam_size=1,
-                vad_filter=False,
-                condition_on_previous_text=False,
-            )
-            texts: list[str] = []
-            logprobs: list[float] = []
-            no_speech_probs: list[float] = []
-            for seg in segments:
-                txt = (seg.text or "").strip()
-                if txt:
-                    texts.append(txt)
-                logprobs.append(float(getattr(seg, "avg_logprob", -0.3)))
-                no_speech_probs.append(float(getattr(seg, "no_speech_prob", 0.0)))
+            try:
+                segments, _info = self._model.transcribe(
+                    str(wav_path),
+                    language=language,
+                    beam_size=1,
+                    vad_filter=False,
+                    condition_on_previous_text=False,
+                )
+                texts: list[str] = []
+                logprobs: list[float] = []
+                no_speech_probs: list[float] = []
+                for seg in segments:
+                    txt = (seg.text or "").strip()
+                    if txt:
+                        texts.append(txt)
+                    logprobs.append(float(getattr(seg, "avg_logprob", -0.3)))
+                    no_speech_probs.append(float(getattr(seg, "no_speech_prob", 0.0)))
 
-            full_text = " ".join(texts).strip()
-            avg_lp = sum(logprobs) / len(logprobs) if logprobs else -1.0
-            max_no_speech = max(no_speech_probs) if no_speech_probs else 1.0
-            is_empty = len(full_text) < 2
-            is_uncertain = is_empty or avg_lp < -1.15 or max_no_speech > 0.78
+                full_text = " ".join(texts).strip()
+                avg_lp = sum(logprobs) / len(logprobs) if logprobs else -1.0
+                max_no_speech = max(no_speech_probs) if no_speech_probs else 1.0
+                is_empty = len(full_text) < 2
+                is_uncertain = is_empty or avg_lp < -1.15 or max_no_speech > 0.78
 
-            return TranscriptionResult(
-                text=full_text,
-                is_empty=is_empty,
-                is_uncertain=is_uncertain,
-                avg_logprob=round(avg_lp, 3),
-                duration_ms=int((time.perf_counter() - start) * 1000),
-                error=None,
-            )
-        except Exception as exc:
-            return TranscriptionResult(
-                text="",
-                is_empty=True,
-                is_uncertain=True,
-                avg_logprob=-99.0,
-                duration_ms=int((time.perf_counter() - start) * 1000),
-                error=f"Erreur STT Faster-Whisper : {exc}",
-            )
+                return TranscriptionResult(
+                    text=full_text,
+                    is_empty=is_empty,
+                    is_uncertain=is_uncertain,
+                    avg_logprob=round(avg_lp, 3),
+                    duration_ms=int((time.perf_counter() - start) * 1000),
+                    error=None,
+                )
+            except Exception as exc:
+                return TranscriptionResult(
+                    text="",
+                    is_empty=True,
+                    is_uncertain=True,
+                    avg_logprob=-99.0,
+                    duration_ms=int((time.perf_counter() - start) * 1000),
+                    error=f"Erreur STT Faster-Whisper : {exc}",
+                )

@@ -46,7 +46,9 @@ class PiperTTSEngine:
         default_tools = Path(__file__).resolve().parents[2] / "tools" / "piper"
         self.tools_dir = Path(tools_dir) if tools_dir else default_tools
 
-        self._lock = threading.RLock()
+        self._model_lock = threading.RLock()
+        self._proc_lock = threading.RLock()
+        self._abort_requested = threading.Event()
         self._loaded_voice_id: str = ""
         self._piper_voice: Any = None
         self._active_proc: subprocess.Popen[bytes] | None = None
@@ -84,22 +86,23 @@ class PiperTTSEngine:
         }
 
     def is_loaded(self) -> bool:
-        with self._lock:
+        with self._model_lock:
             return self._piper_voice is not None
 
     def last_used_monotonic(self) -> float:
         return self._last_used_monotonic
 
     def unload(self) -> None:
-        with self._lock:
-            self.abort_synthesis()
+        self.abort_synthesis()
+        with self._model_lock:
             if self._piper_voice is not None:
                 self._piper_voice = None
                 self._loaded_voice_id = ""
                 gc.collect()
 
     def abort_synthesis(self) -> None:
-        with self._lock:
+        self._abort_requested.set()
+        with self._proc_lock:
             proc = self._active_proc
             if proc is not None and proc.poll() is None:
                 try:
@@ -146,29 +149,30 @@ class PiperTTSEngine:
         sample_rate: int,
         length_scale: float,
     ) -> SynthesizedAudio:
-        if self._piper_voice is None or self._loaded_voice_id != voice_id:
-            if self._piper_voice is not None:
-                self._piper_voice = None
-                gc.collect()
-            self._piper_voice = PiperVoice.load(str(onnx_path), config_path=str(json_path), use_cuda=False)
-            self._loaded_voice_id = voice_id
+        with self._model_lock:
+            if self._piper_voice is None or self._loaded_voice_id != voice_id:
+                if self._piper_voice is not None:
+                    self._piper_voice = None
+                    gc.collect()
+                self._piper_voice = PiperVoice.load(str(onnx_path), config_path=str(json_path), use_cuda=False)
+                self._loaded_voice_id = voice_id
 
-        chunks: list[bytes] = []
-        # PiperVoice API across versions (synthesize_stream_raw vs synthesize)
-        if hasattr(self._piper_voice, "synthesize_stream_raw"):
-            try:
-                gen = self._piper_voice.synthesize_stream_raw(text, length_scale=length_scale)
-            except TypeError:
-                gen = self._piper_voice.synthesize_stream_raw(text)
-            for chunk in gen:
-                chunks.append(bytes(chunk))
-        else:
-            for audio_chunk in self._piper_voice.synthesize(text):
-                raw = getattr(audio_chunk, "audio_int16_bytes", None)
-                if raw is not None:
-                    chunks.append(bytes(raw))
-                else:
-                    chunks.append(bytes(audio_chunk))
+            chunks: list[bytes] = []
+            if hasattr(self._piper_voice, "synthesize_stream_raw"):
+                try:
+                    gen = self._piper_voice.synthesize_stream_raw(text, length_scale=length_scale)
+                except TypeError:
+                    gen = self._piper_voice.synthesize_stream_raw(text)
+                for chunk in gen:
+                    if self._abort_requested.is_set():
+                        return SynthesizedAudio(pcm_int16=b"", sample_rate=sample_rate, duration_ms=0, error="Synthèse annulée.")
+                    chunks.append(bytes(chunk))
+            else:
+                for audio_chunk in self._piper_voice.synthesize(text):
+                    if self._abort_requested.is_set():
+                        return SynthesizedAudio(pcm_int16=b"", sample_rate=sample_rate, duration_ms=0, error="Synthèse annulée.")
+                    raw = getattr(audio_chunk, "audio_int16_bytes", None)
+                    chunks.append(bytes(raw) if raw is not None else bytes(audio_chunk))
 
         return SynthesizedAudio(
             pcm_int16=b"".join(chunks),
@@ -206,7 +210,7 @@ class PiperTTSEngine:
             stderr=subprocess.PIPE,
             creationflags=creationflags,
         )
-        with self._lock:
+        with self._proc_lock:
             self._active_proc = proc
 
         try:
@@ -220,9 +224,17 @@ class PiperTTSEngine:
                 error=f"Délai TTS dépassé ({timeout:.0f} s).",
             )
         finally:
-            with self._lock:
+            with self._proc_lock:
                 if self._active_proc is proc:
                     self._active_proc = None
+
+        if self._abort_requested.is_set():
+            return SynthesizedAudio(
+                pcm_int16=b"",
+                sample_rate=sample_rate,
+                duration_ms=0,
+                error="Synthèse annulée.",
+            )
 
         if proc.returncode != 0:
             err_txt = stderr_data.decode("utf-8", errors="replace").strip()
@@ -264,6 +276,7 @@ class PiperTTSEngine:
 
         onnx_path, json_path = self.voice_manager.get_voice_paths(voice_id)
         length_scale = round(1.0 / max(0.65, min(1.5, float(speed))), 3)
+        self._abort_requested.clear()
         self._last_used_monotonic = time.monotonic()
 
         try:
@@ -296,6 +309,14 @@ class PiperTTSEngine:
                     sample_rate=sample_rate,
                     length_scale=length_scale,
                     timeout=timeout,
+                )
+
+            if self._abort_requested.is_set() and not res.error:
+                return SynthesizedAudio(
+                    pcm_int16=b"",
+                    sample_rate=sample_rate,
+                    duration_ms=int((time.perf_counter() - start) * 1000),
+                    error="Synthèse annulée.",
                 )
 
             if res.error:

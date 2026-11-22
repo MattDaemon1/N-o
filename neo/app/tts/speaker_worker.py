@@ -32,13 +32,13 @@ class SpeechJob:
     speed: float
     volume: float
     delay_ms: int
-    on_start: Callable[[str], None] | None = None
-    on_playback: Callable[[str], None] | None = None
-    on_finish: Callable[[bool, int, str | None], None] | None = None
+    on_start: Callable[[int, str], None] | None = None
+    on_playback: Callable[[int, str], None] | None = None
+    on_finish: Callable[[int, bool, int, str | None], None] | None = None
 
 
 class SpeakerWorker:
-    """Serialized single-speaker thread: max 1 active speech, instant stop (<50 ms), zero audio backlog."""
+    """Serialized single-speaker thread: max 1 active speech, instant stop (~20 ms chunks), zero audio backlog."""
 
     def __init__(self, engine: PiperTTSEngine) -> None:
         self.engine = engine
@@ -56,6 +56,10 @@ class SpeakerWorker:
 
     def set_auto_unload_seconds(self, seconds: int) -> None:
         self._auto_unload_seconds = max(0, int(seconds))
+
+    def current_job_id(self) -> int:
+        with self._lock:
+            return self._job_counter
 
     def start(self) -> None:
         with self._lock:
@@ -91,14 +95,13 @@ class SpeakerWorker:
         speed: float,
         volume: float,
         delay_ms: int = 0,
-        on_start: Callable[[str], None] | None = None,
-        on_playback: Callable[[str], None] | None = None,
-        on_finish: Callable[[bool, int, str | None], None] | None = None,
+        on_start: Callable[[int, str], None] | None = None,
+        on_playback: Callable[[int, str], None] | None = None,
+        on_finish: Callable[[int, bool, int, str | None], None] | None = None,
     ) -> int:
         """Schedules speech in a single slot (never accumulates an uncontrolled queue)."""
         self.start()
         with self._lock:
-            # Cancel any currently playing/waiting speech before accepting new explicit/approved speech
             if self._active_job is not None or self._pending_job is not None:
                 self._cancel_current_locked()
             self._cancel_event.clear()
@@ -122,14 +125,14 @@ class SpeakerWorker:
         self._cancel_event.set()
         self._pending_job = None
         self.engine.abort_synthesis()
+        # Note: Only call stream.abort() here (safe across threads in PortAudio).
+        # stream.close() MUST run exclusively in the worker thread's finally block.
         stream = self._active_stream
         if stream is not None:
             try:
                 stream.abort()
-                stream.close()
             except Exception:
                 pass
-            self._active_stream = None
         if winsound is not None:
             try:
                 winsound.PlaySound(None, 0)
@@ -183,14 +186,14 @@ class SpeakerWorker:
                     if self._shutdown_event.is_set() or self._cancel_event.is_set():
                         interrupted = True
                         return
-                    time.sleep(0.03)
+                    time.sleep(0.02)
 
             if self._shutdown_event.is_set() or self._cancel_event.is_set():
                 interrupted = True
                 return
 
             if job.on_start:
-                job.on_start(job.text)
+                job.on_start(job.job_id, job.text)
 
             # 2. CPU synthesis via Piper
             synth = self.engine.synthesize_pcm(
@@ -208,9 +211,9 @@ class SpeakerWorker:
                 return
 
             if job.on_playback:
-                job.on_playback(job.text)
+                job.on_playback(job.job_id, job.text)
 
-            # 3. Chunked audio playback (interruptible within <50 ms)
+            # 3. Chunked audio playback (20 ms chunks for rapid interruption)
             interrupted, play_err = self._play_pcm_chunked(synth.pcm_int16, synth.sample_rate)
             if play_err:
                 err_msg = play_err
@@ -220,7 +223,7 @@ class SpeakerWorker:
             total_ms = int((time.perf_counter() - start_total) * 1000)
             if job.on_finish:
                 try:
-                    job.on_finish(interrupted, total_ms, err_msg)
+                    job.on_finish(job.job_id, interrupted, total_ms, err_msg)
                 except Exception:
                     pass
 
@@ -229,7 +232,7 @@ class SpeakerWorker:
             return False, None
 
         if sd is not None:
-            chunk_frames = max(256, int(sample_rate * 0.05))  # 50 ms per chunk
+            chunk_frames = max(160, int(sample_rate * 0.02))  # 20 ms per chunk
             chunk_bytes = chunk_frames * 2  # int16 mono
             stream = None
             try:
@@ -254,7 +257,7 @@ class SpeakerWorker:
                     stream.write(chunk)
                 return False, None
             except Exception as exc:
-                if self._cancel_event.is_set():
+                if self._cancel_event.is_set() or self._shutdown_event.is_set():
                     return True, None
                 return False, f"Sortie audio indisponible : {exc}"
             finally:

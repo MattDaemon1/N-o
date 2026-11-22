@@ -111,6 +111,7 @@ class StateManager:
         self.tts_last_error: str | None = None
         self.tts_last_spoken_text: str = ""
         self.tts_last_spoken_at: float = 0.0
+        self.tts_playback_ended_at: float = 0.0
         self.recent_spoken_phrases: list[tuple[float, str]] = []
 
         self.active_proposal: ProposalRecord | None = None
@@ -162,22 +163,86 @@ class StateManager:
                     (ts, phr) for ts, phr in self.recent_spoken_phrases[-6:] if now - ts <= 15.0
                 ]
 
-    def is_probable_tts_echo(self, transcript: str, window_seconds: float = 9.0) -> bool:
-        """Detects when the microphone accidentally recaptured NÉO's own speaker output."""
-        norm = re.sub(r"[^\w\sàâäéèêëîïôöùûüç]", " ", transcript.lower())
+    def mark_tts_playback_ended(self) -> None:
+        with self._lock:
+            self.tts_playback_ended_at = time.monotonic()
+
+    def is_probable_tts_echo(
+        self,
+        transcript: str,
+        post_playback_grace_seconds: float = 3.5,
+    ) -> bool:
+        """Detects when the microphone accidentally recaptured NÉO's own speaker output
+        without blocking genuine learner questions or trainer interruptions."""
+        raw = transcript.strip()
+        lower_raw = raw.lower()
+        norm = re.sub(r"[^\w\sàâäéèêëîïôöùûüç]", " ", lower_raw)
         norm = re.sub(r"\s+", " ", norm).strip()
         if len(norm) < 8:
             return False
+
+        human_question_or_interrupt = (
+            raw.endswith("?")
+            or lower_raw.startswith(
+                (
+                    "pourquoi",
+                    "comment",
+                    "est-ce",
+                    "qu'est-ce",
+                    "c'est quoi",
+                    "peux-tu",
+                    "néo",
+                    "neo",
+                    "attends",
+                    "stop",
+                    "arrête",
+                )
+            )
+            or any(
+                cue in lower_raw
+                for cue in (
+                    "pas compris",
+                    "mais du coup",
+                    "néo ",
+                    "neo ",
+                    "arrête ",
+                    "attends ",
+                )
+            )
+        )
+
         now = time.monotonic()
         with self._lock:
+            in_active_window = (
+                self.tts_speaking
+                or (
+                    self.tts_playback_ended_at > 0.0
+                    and (now - self.tts_playback_ended_at) <= post_playback_grace_seconds
+                )
+            )
             for ts, phr in self.recent_spoken_phrases:
-                if now - ts > window_seconds:
+                within_phrase_window = in_active_window or (
+                    self.tts_playback_ended_at == 0.0 and (now - ts) <= 9.0
+                )
+                if not within_phrase_window or (now - ts) > 15.0:
                     continue
-                if norm in phr or phr in norm:
+
+                if norm == phr:
                     return True
+
+                if human_question_or_interrupt:
+                    continue
+
+                if len(norm.split()) >= 3 and norm in phr:
+                    return True
+
                 t_words = {w for w in norm.split() if len(w) >= 4}
                 p_words = {w for w in phr.split() if len(w) >= 4}
-                if len(t_words) >= 3 and len(t_words & p_words) / len(t_words) >= 0.72:
+                if (
+                    len(t_words) >= 3
+                    and len(t_words & p_words) / len(t_words) >= 0.80
+                    and len(t_words - p_words) <= 1
+                ):
                     return True
         return False
 
@@ -216,6 +281,32 @@ class StateManager:
             if len(self.recent_transcripts) > 12:
                 self.recent_transcripts = self.recent_transcripts[-12:]
 
+    def get_recent_transcripts(self) -> list[dict]:
+        with self._lock:
+            return list(self.recent_transcripts)
+
+    def record_question(self, text: str) -> None:
+        with self._lock:
+            self.asked_questions.append(text)
+            if len(self.asked_questions) > 20:
+                self.asked_questions = self.asked_questions[-20:]
+
+    def get_asked_questions(self) -> list[str]:
+        with self._lock:
+            return list(self.asked_questions)
+
+    def record_answer(self, text: str) -> None:
+        if not text:
+            return
+        with self._lock:
+            self.recent_answers.append(text)
+            if len(self.recent_answers) > 15:
+                self.recent_answers = self.recent_answers[-15:]
+
+    def get_recent_answers(self) -> list[str]:
+        with self._lock:
+            return list(self.recent_answers)
+
     def reset_session_memory(self) -> None:
         with self._lock:
             self.active_proposal = None
@@ -224,6 +315,7 @@ class StateManager:
             self.recent_answers.clear()
             self.recent_transcripts.clear()
             self.recent_spoken_phrases.clear()
+            self.tts_playback_ended_at = 0.0
             self.last_silence_reason = None
             self.last_intervention_monotonic = 0.0
             self.metrics = SessionMetrics()

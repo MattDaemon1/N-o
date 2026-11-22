@@ -162,6 +162,8 @@ class AudioCapture:
             if status:
                 # PortAudio input overflow/underflow or device warning
                 self._last_error = f"Alerte flux audio : {status}"
+            else:
+                self._last_error = None
             try:
                 if np is not None:
                     pcm = bytes(indata)
@@ -213,6 +215,7 @@ class AudioCapture:
         with self._lock:
             self._running = False
             self._current_level = 0.0
+            self._last_error = None
             if self._stream is not None:
                 try:
                     self._stream.stop()

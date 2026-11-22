@@ -34,8 +34,8 @@ class DecisionEngine:
             stt_uncertain=stt_uncertain,
             explicit_trainer_request=explicit_trainer_request,
             cooldown_remaining=cooldown,
-            asked_questions=state.asked_questions,
-            recent_answers=state.recent_answers,
+            asked_questions=state.get_asked_questions(),
+            recent_answers=state.get_recent_answers(),
         )
 
     def post_check(
@@ -66,7 +66,7 @@ class DecisionEngine:
             confidence=confidence,
             learner_response=learner_response,
             private_trainer_note=private_trainer_note,
-            recent_answers=state.recent_answers,
+            recent_answers=state.get_recent_answers(),
             max_sentences=config.max_response_sentences,
             max_chars=config.max_response_chars,
             epoch_before=epoch_before,
