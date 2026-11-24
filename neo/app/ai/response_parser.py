@@ -30,9 +30,34 @@ InterventionTypeStr = Literal[
 ]
 
 
+_DEFAULT_ANALYSIS = "Analyse pédagogique non précisée."
+_DEFAULT_FALLBACK_REASON = "Fallback déterministe suite à une réponse LLM indisponible ou invalide."
+_ANALYSIS_MAX_LENGTH = 320
+
+
+def _bound_analysis(
+    text: str,
+    *,
+    max_len: int = _ANALYSIS_MAX_LENGTH,
+    default: str = _DEFAULT_ANALYSIS,
+) -> str:
+    clean = " ".join((text or "").split())
+    if not clean:
+        return default
+    if len(clean) <= max_len:
+        return clean
+    cutoff = max(1, max_len - 1)
+    truncated = clean[:cutoff].rsplit(" ", 1)[0].rstrip(".,;:")
+    if not truncated:
+        truncated = clean[:cutoff].rstrip(".,;:")
+    if not truncated:
+        truncated = clean[:cutoff]
+    return f"{truncated}…"
+
+
 class ParsedPedagogicalResponse(BaseModel):
     event_type: EventTypeStr = "ECHANGE_NORMAL"
-    analysis: str = Field(default="Analyse pédagogique non précisée.", max_length=320)
+    analysis: str = Field(default=_DEFAULT_ANALYSIS, max_length=_ANALYSIS_MAX_LENGTH)
     should_intervene: bool = False
     intervention_type: InterventionTypeStr = "Aide au formateur"
     is_off_topic: bool = False
@@ -61,23 +86,39 @@ class ResponseParser:
         candidate = _extract_json_object(raw_text)
         try:
             data = json.loads(candidate)
-            parsed = ParsedPedagogicalResponse.model_validate(data)
-            return parsed, None
-        except (json.JSONDecodeError, ValidationError) as exc:
+        except json.JSONDecodeError as exc:
             return None, f"JSON invalide : {exc}"
+
+        if not isinstance(data, dict):
+            return None, f"Validation schéma LLM : objet JSON attendu (reçu {type(data).__name__})."
+
+        payload = dict(data)
+        if isinstance(payload.get("analysis"), str) and len(payload["analysis"]) > _ANALYSIS_MAX_LENGTH:
+            payload["analysis"] = _bound_analysis(payload["analysis"])
+
+        try:
+            parsed = ParsedPedagogicalResponse.model_validate(payload)
+            return parsed, None
+        except ValidationError as exc:
+            return None, f"Validation schéma LLM : {exc}"
 
     @staticmethod
     def deterministic_fallback(
         transcript: str,
         *,
         explicit_request: bool = False,
-        reason: str = "Fallback déterministe suite à une réponse LLM indisponible ou invalide.",
+        reason: str = _DEFAULT_FALLBACK_REASON,
     ) -> ParsedPedagogicalResponse:
+        safe_analysis = _bound_analysis(
+            reason,
+            max_len=_ANALYSIS_MAX_LENGTH,
+            default=_DEFAULT_FALLBACK_REASON,
+        )
         lower = transcript.lower()
         if any(w in lower for w in ("comprends pas", "perdu", "flou", "compliqué", "difficile")):
             return ParsedPedagogicalResponse(
                 event_type="INCOMPREHENSION",
-                analysis=reason,
+                analysis=safe_analysis,
                 should_intervene=True,
                 intervention_type="Détection de confusion",
                 confidence=0.62,
@@ -89,7 +130,7 @@ class ResponseParser:
         if "?" in transcript or lower.startswith(("pourquoi", "comment", "est-ce que", "c'est quoi")):
             return ParsedPedagogicalResponse(
                 event_type="QUESTION",
-                analysis=reason,
+                analysis=safe_analysis,
                 should_intervene=explicit_request,
                 intervention_type="Aide au formateur",
                 is_uncertain=not explicit_request,
@@ -99,7 +140,7 @@ class ResponseParser:
             )
         return ParsedPedagogicalResponse(
             event_type="ECHANGE_NORMAL",
-            analysis=reason,
+            analysis=safe_analysis,
             should_intervene=False,
             is_uncertain=True,
             confidence=0.35,

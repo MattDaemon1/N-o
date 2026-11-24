@@ -358,54 +358,22 @@ class PedagogicalService:
         )
 
         total_ms = 0
-        try:
+
+        async def _call_ollama(prompt: str, max_tokens: int, temperature: float) -> tuple[str, int]:
             task = asyncio.create_task(
                 self.ollama.generate_json(
                     model=cfg.ollama_model,
                     system_prompt=SYSTEM_PROMPT,
-                    user_prompt=user_prompt,
-                    temperature=cfg.llm_temperature,
-                    max_tokens=260,
+                    user_prompt=prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
                     timeout=cfg.llm_timeout_seconds,
                 )
             )
             self.session_controller.register_active_llm_task(task)
-            raw_text, ms1 = await task
-            total_ms += ms1
+            return await task
 
-            parsed, err = ResponseParser.parse(raw_text)
-            if parsed is not None:
-                return parsed, total_ms, None
-
-            # Maximum ONE repair attempt (Section 11)
-            repair_task = asyncio.create_task(
-                self.ollama.generate_json(
-                    model=cfg.ollama_model,
-                    system_prompt=SYSTEM_PROMPT,
-                    user_prompt=PromptManager.build_json_repair_prompt(raw_text),
-                    temperature=0.0,
-                    max_tokens=240,
-                    timeout=cfg.llm_timeout_seconds,
-                )
-            )
-            self.session_controller.register_active_llm_task(repair_task)
-            repaired_raw, ms2 = await repair_task
-            total_ms += ms2
-
-            repaired, err2 = ResponseParser.parse(repaired_raw)
-            if repaired is not None:
-                return repaired, total_ms, None
-
-            return (
-                ResponseParser.deterministic_fallback(
-                    transcript,
-                    explicit_request=explicit_request,
-                    reason=f"Fallback déterministe ({err2 or err}).",
-                ),
-                total_ms,
-                err2 or err,
-            )
-        except asyncio.CancelledError:
+        def _cancelled_response() -> tuple[ParsedPedagogicalResponse, int, str]:
             return (
                 ParsedPedagogicalResponse(
                     event_type="ECHANGE_NORMAL",
@@ -416,16 +384,62 @@ class PedagogicalService:
                 total_ms,
                 "Inférence interrompue par le formateur.",
             )
-        except Exception as exc:
-            return (
-                ResponseParser.deterministic_fallback(
+
+        def _safe_fallback(reason: str, full_error: str) -> tuple[ParsedPedagogicalResponse, int, str]:
+            try:
+                fb = ResponseParser.deterministic_fallback(
                     transcript,
                     explicit_request=explicit_request,
-                    reason=f"Ollama indisponible ({exc}).",
-                ),
-                total_ms,
-                str(exc),
-            )
+                    reason=reason,
+                )
+                return fb, total_ms, full_error
+            except Exception as fb_exc:
+                fb = ParsedPedagogicalResponse(
+                    event_type="ECHANGE_NORMAL",
+                    analysis="Fallback déterministe suite à une erreur interne.",
+                    should_intervene=False,
+                    is_uncertain=True,
+                    confidence=0.35,
+                )
+                return fb, total_ms, f"{full_error} | Erreur interne fallback : {fb_exc}"
+
+        try:
+            try:
+                raw_text, ms1 = await _call_ollama(user_prompt, 260, cfg.llm_temperature)
+                total_ms += ms1
+            except asyncio.CancelledError:
+                return _cancelled_response()
+            except Exception as exc:
+                err_msg = f"Ollama indisponible ({exc})."
+                return _safe_fallback(err_msg, err_msg)
+
+            parsed, err = ResponseParser.parse(raw_text)
+            if parsed is not None:
+                return parsed, total_ms, None
+
+            # Maximum ONE repair attempt (Section 11)
+            try:
+                repaired_raw, ms2 = await _call_ollama(
+                    PromptManager.build_json_repair_prompt(raw_text),
+                    240,
+                    0.0,
+                )
+                total_ms += ms2
+            except asyncio.CancelledError:
+                return _cancelled_response()
+            except Exception as exc:
+                repair_comm_err = (
+                    f"Échec réparation LLM (communication Ollama : {exc}) "
+                    f"après erreur initiale ({err})."
+                )
+                return _safe_fallback(repair_comm_err, repair_comm_err)
+
+            repaired, err2 = ResponseParser.parse(repaired_raw)
+            if repaired is not None:
+                return repaired, total_ms, None
+
+            diagnostic = f"Échec après réparation LLM : {err2} (erreur initiale : {err})."
+            return _safe_fallback(diagnostic, diagnostic)
         finally:
             self.session_controller.register_active_llm_task(None)
 

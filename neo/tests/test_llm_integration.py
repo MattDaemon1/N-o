@@ -111,3 +111,204 @@ def test_ollama_overlong_response_is_clamped(tmp_path: Path):
     res = asyncio.run(svc.process_transcript(transcript="À quoi sert le code 422 ?"))
     assert res["intervened"] is True
     assert "Troisième phrase" not in res["proposal"]["learner_response"]
+
+
+def test_parse_valid_analysis_and_overlong_analysis_preserves_learner_response():
+    import json
+
+    # A. Valid analysis <= 320 characters is preserved verbatim
+    short_analysis = "L'apprenant demande la différence entre HTTP 400 et HTTP 422."
+    learner_text = (
+        "Le code 400 signale une syntaxe JSON cassée, alors que le code 422 "
+        "indique un JSON bien formé mais invalide sur le plan métier."
+    )
+    raw_ok = json.dumps(
+        {
+            "event_type": "QUESTION",
+            "analysis": short_analysis,
+            "should_intervene": True,
+            "intervention_type": "Explication simplifiée",
+            "is_off_topic": False,
+            "is_uncertain": False,
+            "confidence": 0.91,
+            "private_trainer_note": "Rappeler l'exemple email.",
+            "learner_response": learner_text,
+        }
+    )
+    parsed_ok, err_ok = ResponseParser.parse(raw_ok)
+    assert err_ok is None
+    assert parsed_ok is not None
+    assert parsed_ok.analysis == short_analysis
+    assert parsed_ok.learner_response == learner_text
+
+    # B & H. Overlong internal analysis (> 320 chars) is deterministically bounded without altering learner_response
+    long_analysis = " ".join(["Analyse pédagogique détaillée très longue sur le contexte technique"] * 10)
+    assert len(long_analysis) > 400
+    raw_long_analysis = json.dumps(
+        {
+            "event_type": "QUESTION",
+            "analysis": long_analysis,
+            "should_intervene": True,
+            "intervention_type": "Analogie",
+            "is_off_topic": False,
+            "is_uncertain": False,
+            "confidence": 0.88,
+            "private_trainer_note": "Note formateur intacte.",
+            "learner_response": learner_text,
+        }
+    )
+    parsed_bounded, err_bounded = ResponseParser.parse(raw_long_analysis)
+    assert err_bounded is None
+    assert parsed_bounded is not None
+    assert len(parsed_bounded.analysis) <= 320
+    assert parsed_bounded.analysis.endswith("…")
+    assert parsed_bounded.learner_response == learner_text
+    assert parsed_bounded.private_trainer_note == "Note formateur intacte."
+
+
+def test_deterministic_fallback_with_huge_reason_and_schema_rejection():
+    import json
+
+    # C. deterministic_fallback must stay valid even with multi-thousand-character reason across all branches
+    huge_reason = "Erreur détaillée très verbeuse " * 150  # ~4500 chars
+    for sample_transcript in (
+        "Je ne comprends pas du tout cet exercice.",
+        "Pourquoi cette route renvoie 422 ?",
+        "D'accord, on continue sur le module suivant.",
+    ):
+        fb = ResponseParser.deterministic_fallback(
+            sample_transcript,
+            explicit_request=True,
+            reason=huge_reason,
+        )
+        assert len(fb.analysis) <= 320
+        assert fb.analysis.endswith("…")
+
+    # D. Invalid intervention_type or out-of-range confidence is strictly rejected (never silently fixed)
+    bad_schema = json.dumps(
+        {
+            "event_type": "QUESTION",
+            "analysis": "Analyse courte.",
+            "should_intervene": True,
+            "intervention_type": "TypeInexistant",
+            "confidence": 0.8,
+            "learner_response": "Texte",
+        }
+    )
+    parsed_bad, err_bad = ResponseParser.parse(bad_schema)
+    assert parsed_bad is None
+    assert err_bad is not None
+    assert err_bad.startswith("Validation schéma LLM")
+
+
+def test_repair_double_failure_ollama_error_distinction_and_full_log_error(tmp_path: Path):
+    import json
+
+    cfg_mgr = ConfigManager(config_path=tmp_path / "cfg.json")
+    cfg_mgr.update({"ollama_model": "llama3.2:1b", "ai_enabled": True, "mode": "ACTIF"})
+
+    state = StateManager()
+    events = EventManager()
+    decision = DecisionEngine()
+    ctrl = SessionController(cfg_mgr, state, events)
+    ollama = OllamaClient("http://127.0.0.1:11434")
+    model_mgr = ModelManager(cfg_mgr, ollama)
+
+    svc = PedagogicalService(
+        config_manager=cfg_mgr,
+        state_manager=state,
+        event_manager=events,
+        decision_engine=decision,
+        session_controller=ctrl,
+        ollama_client=ollama,
+        model_manager=model_mgr,
+    )
+
+    # E & G. Double schema failure produces verbose error (> 320 chars): fallback succeeds cleanly,
+    # analysis is <= 320, LLM_FALLBACK.error keeps full diagnostic, and NOT mislabeled as Ollama indisponible.
+    invalid_schema_json = json.dumps(
+        {
+            "event_type": "QUESTION",
+            "analysis": "Analyse courte.",
+            "should_intervene": True,
+            "intervention_type": "InvalidePourProvoquerValidationError_" + ("X" * 120),
+            "confidence": 0.9,
+            "learner_response": "Texte test",
+        }
+    )
+    ollama.generate_json = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[
+            ("Pas du json valide", 20),
+            (invalid_schema_json, 25),
+        ]
+    )
+    res_schema = asyncio.run(
+        svc.process_transcript(
+            transcript="Pourquoi la validation échoue ici ?",
+            speaker="Formateur",
+            explicit_trainer_request=True,
+        )
+    )
+    assert res_schema["intervened"] is True
+    assert len(res_schema["proposal"]["analysis"]) <= 320
+    assert "Ollama indisponible" not in res_schema["proposal"]["analysis"]
+
+    fallback_events = [e for e in events.list_events(limit=10) if e["event_type"] == "LLM_FALLBACK"]
+    assert len(fallback_events) == 1
+    logged_err = fallback_events[0]["error"]
+    assert "Échec après réparation LLM" in logged_err
+    assert "JSON invalide" in logged_err
+    assert "Validation schéma LLM" in logged_err
+    assert "Ollama indisponible" not in logged_err
+    assert "string_too_long" not in logged_err
+
+    # F. Real Ollama network/timeout exception is classified as Ollama indisponible (not parsing error)
+    events.clear()
+    state.reset_session_memory()
+    long_network_exc = RuntimeError("Connexion refusée vers 127.0.0.1:11434 : " + ("détail réseau " * 30))
+    ollama.generate_json = AsyncMock(side_effect=long_network_exc)  # type: ignore[method-assign]
+    res_net = asyncio.run(
+        svc.process_transcript(
+            transcript="Pourquoi Ollama ne répond pas ?",
+            speaker="Formateur",
+            explicit_trainer_request=True,
+        )
+    )
+    assert res_net["intervened"] is True
+    assert len(res_net["proposal"]["analysis"]) <= 320
+    assert res_net["proposal"]["analysis"].startswith("Ollama indisponible")
+    net_events = [e for e in events.list_events(limit=10) if e["event_type"] == "LLM_FALLBACK"]
+    assert len(net_events) == 1
+    assert net_events[0]["error"].startswith("Ollama indisponible")
+    assert len(net_events[0]["error"]) > 320  # Full untruncated error preserved in log
+
+    # H. Full E2E through PedagogicalService with overlong analysis keeps exact learner_response
+    events.clear()
+    state.reset_session_memory()
+    exact_learner_reply = "Une API REST utilise POST pour créer et PUT pour remplacer une ressource entière."
+    valid_with_long_analysis = json.dumps(
+        {
+            "event_type": "DEMANDE_FORMATEUR",
+            "analysis": "Analyse interne verbeuse " * 25,
+            "should_intervene": True,
+            "intervention_type": "Exemple concret",
+            "is_off_topic": False,
+            "is_uncertain": False,
+            "confidence": 0.95,
+            "private_trainer_note": "Clarification directe.",
+            "learner_response": exact_learner_reply,
+        }
+    )
+    ollama.generate_json = AsyncMock(return_value=(valid_with_long_analysis, 18))  # type: ignore[method-assign]
+    res_e2e = asyncio.run(
+        svc.process_transcript(
+            transcript="Néo, résume POST vs PUT en une phrase.",
+            speaker="Formateur",
+            explicit_trainer_request=True,
+        )
+    )
+    assert res_e2e["intervened"] is True
+    assert len(res_e2e["proposal"]["analysis"]) <= 320
+    assert res_e2e["proposal"]["learner_response"] == exact_learner_reply
+    assert [e for e in events.list_events(limit=10) if e["event_type"] == "LLM_FALLBACK"] == []
+
