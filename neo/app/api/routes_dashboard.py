@@ -47,6 +47,7 @@ async def get_dashboard_state(request: Request) -> dict[str, Any]:
         "config_warning": rt.config_manager.last_warning,
         "training_context": cfg.training_context.model_dump(),
         "active_proposal": st.active_proposal.to_dict() if st.active_proposal else None,
+        "direct_response": st.last_direct_response,
         "published_to_learners": st.published_to_learners[:10],
         "history": rt.event_manager.list_events(limit=80),
         "metrics": {

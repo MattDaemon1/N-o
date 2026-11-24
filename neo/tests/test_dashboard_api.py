@@ -58,6 +58,7 @@ def test_dashboard_api_session_modes_models_mics_and_history(tmp_path: Path):
             html_res = client.get("/")
             assert html_res.status_code == 200
             assert "NÉO" in html_res.text
+            assert '<option value="REPONSE">REPONSE</option>' in html_res.text
 
             # List & select Ollama model
             m_res = client.get("/api/models")
@@ -78,6 +79,8 @@ def test_dashboard_api_session_modes_models_mics_and_history(tmp_path: Path):
 
             # Session lifecycle & modes
             assert client.post("/api/session/start").json()["ok"] is True
+            assert client.post("/api/session/mode", json={"mode": "REPONSE"}).json()["mode"] == "REPONSE"
+            assert client.get("/api/dashboard/state").json()["mode"] == "REPONSE"
             assert client.post("/api/session/mode", json={"mode": "PASSIF"}).json()["mode"] == "PASSIF"
             assert client.post("/api/session/pause").json()["ok"] is True
             assert client.post("/api/session/resume").json()["ok"] is True

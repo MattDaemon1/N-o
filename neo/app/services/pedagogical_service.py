@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import re
+import time
 from datetime import datetime
 from typing import Any
 
 from app.ai.model_manager import ModelManager
 from app.ai.ollama_client import OllamaClient
-from app.ai.prompt_manager import SYSTEM_PROMPT, PromptManager
+from app.ai.prompt_manager import DIRECT_RESPONSE_SYSTEM_PROMPT, SYSTEM_PROMPT, PromptManager
 from app.ai.response_parser import ParsedPedagogicalResponse, ResponseParser
 from app.config.config_manager import ConfigManager
-from app.core.behavior_engine import BehaviorEngine
+from app.core.behavior_engine import NOISE_ARTIFACTS, BehaviorEngine
 from app.core.event_manager import EventManager
 from app.core.session_controller import SessionController
 from app.core.state_manager import BehaviorMode, NeoState, ProposalRecord, StateManager
@@ -145,6 +147,16 @@ class PedagogicalService:
     ) -> dict[str, Any]:
         cfg = self.config_manager.config
         epoch_before = self.state_manager.current_interruption_epoch()
+
+        if cfg.mode == BehaviorMode.REPONSE.value:
+            return await self._process_direct_response(
+                transcript=transcript,
+                stt_uncertain=stt_uncertain,
+                explicit_trainer_request=explicit_trainer_request,
+                transcription_ms=transcription_ms,
+                is_simulated=is_simulated,
+                epoch_before=epoch_before,
+            )
 
         if not is_simulated and not explicit_trainer_request and self.state_manager.is_probable_tts_echo(transcript):
             reason = "Écho acoustique de NÉO détecté : segment ignoré."
@@ -297,6 +309,240 @@ class PedagogicalService:
             "intervened": True,
             "decision": post.decision_reason,
             "proposal": proposal.to_dict(),
+            "tts": tts_result,
+        }
+
+    def _is_duplicate_or_continuation_direct_segment(self, transcript: str, norm: str) -> bool:
+        prev = self.state_manager._last_direct_utterance
+        if prev is None:
+            return False
+        last_ts, last_norm, last_has_qmark = prev
+        if not last_norm:
+            return False
+
+        elapsed = time.monotonic() - last_ts
+        words = norm.split()
+        last_words = last_norm.split()
+
+        # 1. Exact/partial repeat or high overlap of the same utterance within 10s
+        if elapsed <= 10.0:
+            if norm == last_norm:
+                return True
+            if len(words) >= 3 and (norm in last_norm or last_norm in norm):
+                return True
+            tokens = self.behavior_engine._meaningful_tokens(transcript)
+            last_tokens = self.behavior_engine._meaningful_tokens(last_norm)
+            if tokens and last_tokens:
+                overlap = len(tokens & last_tokens)
+                ratio = overlap / max(1, min(len(tokens), len(last_tokens)))
+                if overlap >= 2 and ratio >= 0.70:
+                    return True
+
+        # 2. Immediate VAD split continuation within 4s
+        if elapsed <= 4.0 and len(last_words) >= 2:
+            raw = transcript.strip()
+            stripped_lead = raw.lstrip(" -—–….,;:«»\"'(")
+            starts_lower = bool(stripped_lead and stripped_lead[0].islower())
+            lower_lead = stripped_lead.lower()
+            starts_continuation = bool(
+                re.match(
+                    r"^(?:et|ou|mais|donc|car|ni|de|du|des|d['’]|au|aux|à|en|pour|par|sur|dans|avec|entre|sans)\b",
+                    lower_lead,
+                )
+            )
+            starts_fresh_request = bool(
+                re.match(
+                    r"^(?:quel(?:le|les|s)?|qui|que|quoi|quand|o[uù]|comment|pourquoi|combien|"
+                    r"est-ce|qu['’]est-ce|c['’]est|explique(?:-moi)?|donne(?:-moi)?|peux-tu|"
+                    r"pouvez-vous|tu\s+peux|dis(?:-moi)?|parle(?:-moi)?|aide(?:-moi)?|"
+                    r"r[eé]sume(?:-moi)?|d[eé]finis|cite|liste|compare|traduis|calcule|"
+                    r"fais(?:-moi)?|bonjour|salut)\b",
+                    lower_lead,
+                )
+            )
+            if starts_lower or starts_continuation or (not last_has_qmark and not starts_fresh_request):
+                return True
+
+        return False
+
+    async def _process_direct_response(
+        self,
+        *,
+        transcript: str,
+        stt_uncertain: bool,
+        explicit_trainer_request: bool,
+        transcription_ms: int,
+        is_simulated: bool,
+        epoch_before: int,
+    ) -> dict[str, Any]:
+        """Direct voice-assistant path for REPONSE mode (zero pedagogical analysis/proposals)."""
+        cfg = self.config_manager.config
+
+        if (
+            not is_simulated
+            and not explicit_trainer_request
+            and self.state_manager.is_probable_tts_echo(transcript)
+        ):
+            reason = "Écho acoustique de NÉO détecté : segment ignoré."
+            self._settle_state()
+            return {"intervened": False, "decision": reason, "proposal": None, "response": None}
+
+        if self.behavior_engine.is_empty_or_noise(transcript, stt_uncertain=stt_uncertain):
+            reason = "Transcription vide ou bruit non exploitable ignoré."
+            self._settle_state()
+            return {"intervened": False, "decision": reason, "proposal": None, "response": None}
+
+        norm = self.behavior_engine.normalize_text(transcript)
+        words = norm.split()
+        normalized_noise = {self.behavior_engine.normalize_text(n) for n in NOISE_ARTIFACTS}
+        if (
+            norm in normalized_noise
+            or len(norm) < 8
+            or len(words) < 3
+            or (stt_uncertain and len(words) < 4)
+        ):
+            reason = "Segment trop court ou incomplet ignoré."
+            self._settle_state()
+            return {"intervened": False, "decision": reason, "proposal": None, "response": None}
+
+        if not explicit_trainer_request and self._is_duplicate_or_continuation_direct_segment(transcript, norm):
+            reason = "Segment successif rattaché à la question précédente ignoré."
+            self._settle_state()
+            return {"intervened": False, "decision": reason, "proposal": None, "response": None}
+
+        self.state_manager._last_direct_utterance = (
+            time.monotonic(),
+            norm,
+            transcript.strip().endswith("?"),
+        )
+
+        def _direct_error(user_msg: str, tech_error: str, llm_ms: int = 0) -> dict[str, Any]:
+            self.state_manager.active_proposal = None
+            self.state_manager.last_direct_response = {
+                "text": user_msg,
+                "created_at": datetime.now().strftime("%H:%M:%S"),
+                "llm_ms": llm_ms,
+                "is_error": True,
+            }
+            self.state_manager.metrics.errors_count += 1
+            self.event_manager.add(
+                kind="error",
+                transcript="",
+                event_type="REPONSE_ERREUR",
+                error=tech_error,
+                transcription_ms=transcription_ms,
+                llm_ms=llm_ms,
+                is_simulated=is_simulated,
+            )
+            self._settle_state()
+            return {
+                "intervened": False,
+                "decision": user_msg,
+                "proposal": None,
+                "response": user_msg,
+                "error": tech_error,
+            }
+
+        if not cfg.ai_enabled or not cfg.ollama_model:
+            tech_err = (
+                "IA désactivée dans la configuration."
+                if not cfg.ai_enabled
+                else "Aucun modèle Ollama sélectionné."
+            )
+            return _direct_error(
+                "Je ne peux pas répondre pour le moment car le modèle local n'est pas disponible.",
+                tech_err,
+            )
+
+        self.ollama.set_base_url(cfg.ollama_url)
+        user_prompt = PromptManager.build_direct_response_prompt(transcript)
+        self.state_manager.set_state(NeoState.ANALYSE)
+
+        try:
+            task = asyncio.create_task(
+                self.ollama.generate_text(
+                    model=cfg.ollama_model,
+                    system_prompt=DIRECT_RESPONSE_SYSTEM_PROMPT,
+                    user_prompt=user_prompt,
+                    temperature=cfg.llm_temperature,
+                    max_tokens=300,
+                    timeout=cfg.llm_timeout_seconds,
+                )
+            )
+            self.session_controller.register_active_llm_task(task)
+            raw_reply, llm_ms = await task
+        except asyncio.CancelledError:
+            self._settle_state()
+            return {
+                "intervened": False,
+                "decision": "Réponse annulée suite à une interruption.",
+                "proposal": None,
+                "response": None,
+            }
+        except Exception as exc:
+            return _direct_error(
+                "Désolé, je n'ai pas pu répondre pour le moment.",
+                f"Erreur Ollama en mode REPONSE : {exc}",
+            )
+        finally:
+            self.session_controller.register_active_llm_task(None)
+
+        if (
+            epoch_before != self.state_manager.current_interruption_epoch()
+            or self.config_manager.config.mode != BehaviorMode.REPONSE.value
+        ):
+            self._settle_state()
+            return {
+                "intervened": False,
+                "decision": "Réponse annulée suite à une interruption.",
+                "proposal": None,
+                "response": None,
+            }
+
+        answer_text = " ".join(raw_reply.strip().split())
+        if not answer_text:
+            return _direct_error(
+                "Désolé, je n'ai pas pu générer de réponse exploitable.",
+                "Réponse vide retournée par Ollama en mode REPONSE.",
+                llm_ms=llm_ms,
+            )
+
+        self.state_manager.metrics.last_llm_ms = llm_ms
+        self.state_manager.active_proposal = None
+        self.state_manager.last_silence_reason = None
+        self.state_manager.last_direct_response = {
+            "text": answer_text,
+            "created_at": datetime.now().strftime("%H:%M:%S"),
+            "llm_ms": llm_ms,
+            "is_error": False,
+        }
+        self.event_manager.add(
+            kind="response",
+            transcript="",
+            event_type="REPONSE",
+            analysis="",
+            decision="",
+            proposal=answer_text,
+            transcription_ms=transcription_ms,
+            llm_ms=llm_ms,
+            is_simulated=is_simulated,
+        )
+
+        tts_result: dict[str, Any] | None = None
+        if self.tts_service is not None and not is_simulated:
+            tts_result = self.tts_service.speak_direct_response(
+                text=answer_text,
+                epoch_before=epoch_before,
+            )
+
+        if not (tts_result and tts_result.get("spoken")):
+            self._settle_state()
+
+        return {
+            "intervened": True,
+            "decision": "Réponse directe générée.",
+            "proposal": None,
+            "response": answer_text,
             "tts": tts_result,
         }
 

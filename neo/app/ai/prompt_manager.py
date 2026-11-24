@@ -24,6 +24,14 @@ Règles impératives :
   "learner_response": "Explication courte (2 à 6 phrases) prête pour les apprenants"
 }"""
 
+DIRECT_RESPONSE_SYSTEM_PROMPT = (
+    "Tu es un assistant vocal. Réponds directement à la question de l'utilisateur "
+    "de manière claire, naturelle et concise. Ne produis que la réponse destinée à "
+    "l'utilisateur. Ne fais pas d'analyse, ne présente pas ton raisonnement, ne produis "
+    "pas de classification, de note, de commentaire pédagogique ou de structure JSON. "
+    "Adapte la longueur à la question. Si tu ne sais pas, indique-le clairement."
+)
+
 
 class PromptManager:
     """Builds minimal context-bounded prompts to save CPU and RAM."""
@@ -77,3 +85,7 @@ class PromptManager:
             "Corrige-la immédiatement en retournant UNIQUEMENT un objet JSON conforme au schéma demandé.\n\n"
             f"Sortie brute à corriger :\n{raw_output[:800]}"
         )
+
+    @staticmethod
+    def build_direct_response_prompt(question: str) -> str:
+        return " ".join(question.strip().split())

@@ -30,6 +30,7 @@ class BehaviorMode(str, Enum):
     PASSIF = "PASSIF"
     SUR_DEMANDE = "SUR_DEMANDE"
     ACTIF = "ACTIF"
+    REPONSE = "REPONSE"
 
 
 class VocalMode(str, Enum):
@@ -117,6 +118,8 @@ class StateManager:
         self.recent_spoken_phrases: list[tuple[float, str]] = []
 
         self.active_proposal: ProposalRecord | None = None
+        self.last_direct_response: dict | None = None
+        self._last_direct_utterance: tuple[float, str, bool] | None = None
         self.published_to_learners: list[dict] = []
         self.metrics: SessionMetrics = SessionMetrics()
 
@@ -341,6 +344,8 @@ class StateManager:
     def reset_session_memory(self) -> None:
         with self._lock:
             self.active_proposal = None
+            self.last_direct_response = None
+            self._last_direct_utterance = None
             self.published_to_learners.clear()
             self.asked_questions.clear()
             self.recent_answers.clear()

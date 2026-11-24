@@ -123,6 +123,49 @@ class OllamaClient:
             text = text[:12000]
         return text, elapsed_ms
 
+    async def generate_text(
+        self,
+        *,
+        model: str,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.2,
+        max_tokens: int = 300,
+        timeout: float = 20.0,
+    ) -> tuple[str, int]:
+        """Calls POST /api/chat for plain-text direct responses (no JSON format constraint)."""
+        if not model:
+            raise ValueError("Aucun modèle Ollama sélectionné.")
+
+        url = f"{self.base_url}/api/chat"
+        body = {
+            "model": model,
+            "stream": False,
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens,
+            },
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+
+        start = time.perf_counter()
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(url, json=body)
+            resp.raise_for_status()
+            data = resp.json()
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+
+        content = (data.get("message") or {}).get("content")
+        if content is None:
+            content = data.get("response", "")
+        text = str(content).strip()
+        if len(text) > 12000:
+            text = text[:12000]
+        return text, elapsed_ms
+
     async def test_model(self, model: str, timeout: float = 15.0) -> dict[str, Any]:
         """Runs a lightweight single-sentence ping test to measure response latency."""
         if not model:

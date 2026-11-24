@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Literal
 from pydantic import BaseModel, Field
 
-BehaviorModeStr = Literal["OFF", "PASSIF", "SUR_DEMANDE", "ACTIF"]
+BehaviorModeStr = Literal["OFF", "PASSIF", "SUR_DEMANDE", "ACTIF", "REPONSE"]
 VocalModeStr = Literal["SILENCIEUX", "ASSISTANT", "AUTONOME"]
 TtsErrorPolicyStr = Literal["silent_fallback", "notify_error"]
 LearnerLevelStr = Literal["Débutant", "Intermédiaire", "Avancé", "Mixte"]

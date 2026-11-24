@@ -168,6 +168,30 @@ class TTSService:
             }
         return self._schedule_speech(raw_text=text, delay_ms=0, origin="ASSISTANT")
 
+    def speak_direct_response(
+        self,
+        *,
+        text: str,
+        epoch_before: int | None = None,
+    ) -> dict[str, Any]:
+        """Speaks direct answers in REPONSE mode using existing TTS engine, queue, and interruption rules."""
+        cfg = self.config_manager.config
+        if cfg.mode != BehaviorMode.REPONSE.value:
+            return {"spoken": False, "reason": "Mode REPONSE inactif."}
+        if not cfg.tts_enabled:
+            return {"spoken": False, "reason": "Voix de NÉO désactivée."}
+        if cfg.vocal_mode == VocalMode.SILENCIEUX.value:
+            return {
+                "spoken": False,
+                "reason": "Mode vocal SILENCIEUX actif : réponse affichée uniquement.",
+            }
+        if (
+            epoch_before is not None
+            and epoch_before != self.state_manager.current_interruption_epoch()
+        ):
+            return {"spoken": False, "reason": "Interruption active : parole annulée."}
+        return self._schedule_speech(raw_text=text, delay_ms=0, origin="REPONSE")
+
     def test_voice(self, text: str | None = None) -> dict[str, Any]:
         """Standalone voice test from the dashboard panel (bypasses listening/LLM pipeline)."""
         cfg = self.config_manager.config

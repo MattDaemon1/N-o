@@ -129,10 +129,10 @@
       `Mode : ${state.mode}`,
     ].join(" · ");
 
-    // Cockpit stream (transcripts / decisions)
+    // Cockpit stream (transcripts / decisions / direct responses)
     const streamEl = $("cockpit-stream");
     const items = (state.history || []).filter(
-      (h) => h.transcript || h.kind === "decision" || h.kind === "error"
+      (h) => h.transcript || h.kind === "decision" || h.kind === "error" || h.kind === "response"
     );
     if (items.length === 0) {
       streamEl.innerHTML = `<div class="empty-box">Aucun échange enregistré pour cette session.</div>`;
@@ -149,7 +149,9 @@
               ${item.is_simulated ? "<span>· SIMULATION</span>" : ""}
             </div>
             ${
-              item.transcript
+              item.kind === "response" && item.proposal
+                ? `<div class="stream-text">${escapeHtml(item.proposal)}</div>`
+                : item.transcript
                 ? `<div class="stream-text">${escapeHtml(item.transcript)}</div>`
                 : ""
             }
@@ -168,8 +170,12 @@
         .join("");
     }
 
-    // Active Proposal
-    renderProposal(state.active_proposal, state.last_silence_reason);
+    // Active Proposal or Direct Response
+    if (state.mode === "REPONSE") {
+      renderDirectResponse(state.direct_response);
+    } else {
+      renderProposal(state.active_proposal, state.last_silence_reason);
+    }
 
     // Learner Broadcasts
     const bList = $("learner-broadcast-list");
@@ -212,6 +218,32 @@
 
     // History table
     renderHistory(state.history || []);
+  }
+
+  function renderDirectResponse(directResp) {
+    const container = $("proposal-container");
+    const meta = $("proposal-meta");
+    if (!directResp || !directResp.text) {
+      meta.textContent = "Mode REPONSE";
+      container.innerHTML = `<div class="empty-box">Mode REPONSE actif : posez une question, NÉO répondra directement sans analyse pédagogique.</div>`;
+      return;
+    }
+
+    meta.textContent = directResp.is_error
+      ? "Mode REPONSE · Indisponible"
+      : `Mode REPONSE · ${directResp.llm_ms || 0} ms`;
+
+    container.innerHTML = `
+      <div class="proposal-card">
+        <div class="small muted">
+          <span class="mono">${escapeHtml(directResp.created_at || "")}</span> ·
+          <strong>${directResp.is_error ? "REPONSE · ERREUR" : "REPONSE"}</strong>
+        </div>
+        <div class="proposal-block">
+          <div>${escapeHtml(directResp.text)}</div>
+        </div>
+      </div>
+    `;
   }
 
   function renderProposal(prop, silenceReason) {
