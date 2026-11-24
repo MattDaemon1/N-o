@@ -450,3 +450,218 @@ def test_runtime_config_centralization_update_reset_and_recovery(tmp_path):
     reloaded = ConfigManager(config_path=cfg_path)
     assert reloaded.config.vocal_mode == "SILENCIEUX"
 
+
+def test_sur_demande_explicit_solicitation_e2e_and_silence_guard(tmp_path):
+    import asyncio
+    import json
+    from unittest.mock import AsyncMock
+
+    from app.ai.model_manager import ModelManager
+    from app.ai.ollama_client import OllamaClient
+    from app.config.config_manager import ConfigManager
+    from app.core.event_manager import EventManager
+    from app.core.session_controller import SessionController
+    from app.core.state_manager import StateManager
+    from app.services.pedagogical_service import PedagogicalService
+
+    cfg_mgr = ConfigManager(config_path=tmp_path / "cfg.json")
+    cfg_mgr.update(
+        {
+            "mode": "SUR_DEMANDE",
+            "ai_enabled": True,
+            "ollama_model": "gemma3:1b",
+            "cooldown_seconds": 0,
+        }
+    )
+    state = StateManager()
+    events = EventManager()
+    eng = BehaviorEngine()
+    ctrl = SessionController(cfg_mgr, state, events)
+    ollama = OllamaClient("http://127.0.0.1:11434")
+    mm = ModelManager(cfg_mgr, ollama)
+
+    llm_payload = json.dumps(
+        {
+            "event_type": "DEMANDE_FORMATEUR",
+            "analysis": "Le formateur demande une comparaison entre modèle fermé et open source.",
+            "should_intervene": True,
+            "intervention_type": "Explication simplifiée",
+            "is_off_topic": False,
+            "is_uncertain": False,
+            "confidence": 0.92,
+            "private_trainer_note": "Synthèse prête.",
+            "learner_response": (
+                "Un modèle fermé garde ses poids et son code privés derrière une API, "
+                "alors qu'un modèle open source publie ses poids pour être exécuté localement."
+            ),
+        }
+    )
+    ollama.generate_json = AsyncMock(return_value=(llm_payload, 35))  # type: ignore[method-assign]
+
+    svc = PedagogicalService(
+        config_manager=cfg_mgr,
+        state_manager=state,
+        event_manager=events,
+        behavior_engine=eng,
+        session_controller=ctrl,
+        ollama_client=ollama,
+        model_manager=mm,
+    )
+
+    # Test 2: Without explicit address to NÉO, SUR_DEMANDE stays SILENCE and never calls LLM
+    res_silent = asyncio.run(
+        svc.process_transcript(
+            transcript="Explique-moi la différence entre un modèle fermé et un modèle open source.",
+            speaker="Apprenant",
+            explicit_trainer_request=False,
+        )
+    )
+    assert res_silent["intervened"] is False
+    assert "SILENCE" in [e["event_type"] for e in events.list_events(limit=5)]
+    assert ollama.generate_json.call_count == 0
+
+    # Test 1: With natural audio transcript addressing Néo (explicit_trainer_request=False),
+    # SUR_DEMANDE calls LLM and produces an intervention proposal
+    events.clear()
+    res_solicited = asyncio.run(
+        svc.process_transcript(
+            transcript="Néo, explique-moi la différence entre un modèle fermé et un modèle open source.",
+            speaker="Apprenant",
+            explicit_trainer_request=False,
+        )
+    )
+    assert ollama.generate_json.call_count == 1
+    assert res_solicited["intervened"] is True
+    assert res_solicited["proposal"] is not None
+    assert "Modèle fermé" in res_solicited["proposal"]["learner_response"] or "modèle fermé" in res_solicited["proposal"]["learner_response"]
+    assert all(e["event_type"] != "SILENCE" for e in events.list_events(limit=5))
+
+
+def test_explicit_solicitation_variants_and_negatives():
+    eng = BehaviorEngine()
+
+    positive_samples = [
+        "Néo, donne-moi un exemple.",
+        "Hé Néo, peux-tu reformuler ?",
+        "Néo : fais une synthèse.",
+        "Donne-moi un exemple, Néo.",
+        "- Néo, explique-moi la différence.",
+        "Dis-moi Néo, quelle est la différence ?",
+        "Ok Néo, résume ce point.",
+        "Peux-tu, Néo, clarifier cette notion ?",
+    ]
+    for sample in positive_samples:
+        assert eng.is_explicit_trainer_solicitation(sample) is True, sample
+        pre = eng.evaluate_pre_llm(
+            mode=BehaviorMode.SUR_DEMANDE,
+            transcript=sample,
+            stt_uncertain=False,
+            explicit_trainer_request=False,
+            cooldown_remaining=0,
+            asked_questions=[],
+            recent_answers=[],
+        )
+        assert pre.allow_llm is True, sample
+
+    negative_samples = [
+        "Explique-moi la différence entre un modèle fermé et un modèle open source.",
+        "Néophyte, explique-moi ça.",
+        "Une approche néo-classique du code.",
+        "Le formateur parle de Néo aux apprenants.",
+        "Dans Matrix, le héros s'appelle Néo.",
+        "   ",
+    ]
+    for sample in negative_samples:
+        assert eng.is_explicit_trainer_solicitation(sample) is False, sample
+        pre = eng.evaluate_pre_llm(
+            mode=BehaviorMode.SUR_DEMANDE,
+            transcript=sample,
+            stt_uncertain=False,
+            explicit_trainer_request=False,
+            cooldown_remaining=0,
+            asked_questions=[],
+            recent_answers=[],
+        )
+        assert pre.allow_llm is False, sample
+
+
+def test_solicitation_cooldown_and_modes_non_regression():
+    eng = BehaviorEngine()
+
+    # Test 4: Cooldown blocks spontaneous ACTIF questions, but vocative solicitation bypasses cooldown
+    pre_blocked = eng.evaluate_pre_llm(
+        mode=BehaviorMode.ACTIF,
+        transcript="Explique-moi la différence entre REST et GraphQL.",
+        stt_uncertain=False,
+        explicit_trainer_request=False,
+        cooldown_remaining=25,
+        asked_questions=[],
+        recent_answers=[],
+    )
+    assert pre_blocked.allow_llm is False
+
+    for mode in (BehaviorMode.ACTIF, BehaviorMode.SUR_DEMANDE):
+        vocative = "Hé Néo, peux-tu reformuler ?"
+        is_exp = eng.is_explicit_trainer_solicitation(vocative, False)
+        assert is_exp is True
+        pre = eng.evaluate_pre_llm(
+            mode=mode,
+            transcript=vocative,
+            stt_uncertain=False,
+            explicit_trainer_request=False,
+            cooldown_remaining=25,
+            asked_questions=[],
+            recent_answers=[],
+        )
+        assert pre.allow_llm is True
+        post = eng.evaluate_post_llm(
+            mode=mode,
+            explicit_trainer_request=is_exp,
+            cooldown_remaining=25,
+            should_intervene=True,
+            event_type="DEMANDE_FORMATEUR",
+            is_off_topic=False,
+            is_uncertain=False,
+            confidence=0.9,
+            learner_response="Voici une reformulation simple.",
+            private_trainer_note="Reformulation prête.",
+            recent_answers=[],
+            max_sentences=4,
+            max_chars=500,
+            epoch_before=1,
+            epoch_after=1,
+        )
+        assert post.allow_proposal is True
+
+    # Test 6: OFF still blocks even explicit vocatives; PASSIF still blocks spontaneous proposals
+    pre_off = eng.evaluate_pre_llm(
+        mode=BehaviorMode.OFF,
+        transcript="Hé Néo, peux-tu reformuler ?",
+        stt_uncertain=False,
+        explicit_trainer_request=True,
+        cooldown_remaining=0,
+        asked_questions=[],
+        recent_answers=[],
+    )
+    assert pre_off.allow_llm is False
+
+    post_passif = eng.evaluate_post_llm(
+        mode=BehaviorMode.PASSIF,
+        explicit_trainer_request=False,
+        cooldown_remaining=0,
+        should_intervene=True,
+        event_type="QUESTION",
+        is_off_topic=False,
+        is_uncertain=False,
+        confidence=0.9,
+        learner_response="Réponse test.",
+        private_trainer_note="",
+        recent_answers=[],
+        max_sentences=4,
+        max_chars=500,
+        epoch_before=0,
+        epoch_after=0,
+    )
+    assert post_passif.allow_proposal is False
+
+

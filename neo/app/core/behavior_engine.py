@@ -108,12 +108,30 @@ class BehaviorEngine:
 
         return is_repeated, already_answered
 
-    @staticmethod
-    def is_explicit_trainer_solicitation(transcript: str, explicit_flag: bool = False) -> bool:
+    _LEADING_VOCATIVE_RE = re.compile(
+        r"^(?:[^\w]+)*"
+        r"(?:(?:dis(?:-moi)?|dis\s+donc|ok(?:ay)?|h[eé]|eh|hey|all[oô]|bonjour|salut|bonsoir|alors|bon|[eé]coute(?:-moi)?|excuse(?:-moi)?|pardon|s['’]il\s+te\s+pla[iî]t|stp|merci)[,\s]+)*"
+        r"n[eé]o(?![\w-])"
+    )
+    _TRAILING_VOCATIVE_RE = re.compile(
+        r",\s*n[eé]o(?![\w-])[\s.!?…»\"']*$"
+    )
+    _MID_VOCATIVE_RE = re.compile(
+        r",\s*n[eé]o(?![\w-])\s*[,:]"
+    )
+
+    @classmethod
+    def is_explicit_trainer_solicitation(cls, transcript: str, explicit_flag: bool = False) -> bool:
         if explicit_flag:
             return True
         lower = transcript.strip().lower()
-        return lower.startswith(("néo", "neo", "dis néo", "ok néo"))
+        if not lower:
+            return False
+        return bool(
+            cls._LEADING_VOCATIVE_RE.search(lower)
+            or cls._TRAILING_VOCATIVE_RE.search(lower)
+            or cls._MID_VOCATIVE_RE.search(lower)
+        )
 
     def evaluate_pre_llm(
         self,

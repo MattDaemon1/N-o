@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -231,6 +232,12 @@ class StateManager:
                     "neo ",
                     "arrête ",
                     "attends ",
+                )
+            )
+            or bool(
+                re.search(
+                    r"(?:^(?:[^\w]+)*(?:(?:dis(?:-moi)?|ok(?:ay)?|h[eé]|eh|hey|bonjour|salut|alors)[,\s]+)?n[eé]o(?![\w-])|,\s*n[eé]o(?![\w-])(?:[\s.!?…»\"']*$|[,:]))",
+                    lower_raw,
                 )
             )
         )
