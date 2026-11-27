@@ -34,6 +34,27 @@
     el.classList.remove("hidden");
   }
 
+  async function runAndRefresh(url, method = "POST", body = null) {
+    try {
+      await api(url, method, body);
+      await pollState();
+    } catch (err) {
+      showAlert(err.message);
+    }
+  }
+
+  async function speakText(text) {
+    try {
+      const res = await api("/api/tts/speak", "POST", { text });
+      if (!res.spoken && res.reason) {
+        showAlert(res.reason);
+      }
+      await pollState();
+    } catch (err) {
+      showAlert(err.message);
+    }
+  }
+
   function switchView(viewName) {
     activeView = viewName;
     document.querySelectorAll(".nav-item").forEach((btn) => {
@@ -197,20 +218,6 @@
           </div>`
         )
         .join("");
-
-      bList.querySelectorAll("[data-broadcast-speak]").forEach((btn) => {
-        btn.addEventListener("click", async () => {
-          const item = pub[Number(btn.dataset.broadcastSpeak)];
-          if (!item || !item.text) return;
-          try {
-            const res = await api("/api/tts/speak", "POST", { text: item.text });
-            if (!res.spoken && res.reason) showAlert(res.reason);
-            await pollState();
-          } catch (err) {
-            showAlert(err.message);
-          }
-        });
-      });
     }
 
     // Simulation cards (render once or keep updated)
@@ -310,49 +317,6 @@
         </div>
       </div>
     `;
-
-    container.querySelectorAll("[data-prop-action]").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        try {
-          await api(`/api/session/proposals/${prop.id}/action`, "POST", {
-            action: btn.dataset.propAction,
-          });
-          await pollState();
-        } catch (err) {
-          showAlert(err.message);
-        }
-      });
-    });
-
-    const speakBtn = container.querySelector("[data-prop-speak]");
-    if (speakBtn) {
-      speakBtn.addEventListener("click", async () => {
-        const txt = prop.learner_response || prop.private_trainer_note || "";
-        try {
-          const res = await api("/api/tts/speak", "POST", { text: txt });
-          if (!res.spoken && res.reason) {
-            showAlert(res.reason);
-          }
-          await pollState();
-        } catch (err) {
-          showAlert(err.message);
-        }
-      });
-    }
-
-    const copyBtn = container.querySelector("[data-prop-copy]");
-    if (copyBtn) {
-      copyBtn.addEventListener("click", async () => {
-        const txt = prop.learner_response || prop.private_trainer_note || "";
-        try {
-          await navigator.clipboard.writeText(txt);
-          copyBtn.textContent = "Copié";
-          setTimeout(() => (copyBtn.textContent = "Copier"), 1500);
-        } catch {
-          showAlert("Copie dans le presse-papiers refusée par le navigateur.");
-        }
-      });
-    }
   }
 
   let scenariosRendered = false;
@@ -657,49 +621,70 @@
       btn.addEventListener("click", () => switchView(btn.dataset.view));
     });
 
-    $("btn-start").addEventListener("click", () =>
-      api("/api/session/start", "POST").then(pollState).catch((e) => showAlert(e.message))
-    );
-    $("btn-pause").addEventListener("click", () =>
-      api("/api/session/pause", "POST").then(pollState).catch((e) => showAlert(e.message))
-    );
-    $("btn-resume").addEventListener("click", () =>
-      api("/api/session/resume", "POST").then(pollState).catch((e) => showAlert(e.message))
-    );
-    $("btn-stop").addEventListener("click", () =>
-      api("/api/session/stop", "POST").then(pollState).catch((e) => showAlert(e.message))
-    );
-    $("btn-interrupt").addEventListener("click", () =>
-      api("/api/session/interrupt", "POST").then(pollState).catch((e) => showAlert(e.message))
-    );
-    $("btn-stop-voice").addEventListener("click", () =>
-      api("/api/tts/stop", "POST").then(pollState).catch((e) => showAlert(e.message))
-    );
+    $("btn-start").addEventListener("click", () => runAndRefresh("/api/session/start"));
+    $("btn-pause").addEventListener("click", () => runAndRefresh("/api/session/pause"));
+    $("btn-resume").addEventListener("click", () => runAndRefresh("/api/session/resume"));
+    $("btn-stop").addEventListener("click", () => runAndRefresh("/api/session/stop"));
+    $("btn-interrupt").addEventListener("click", () => runAndRefresh("/api/session/interrupt"));
+    $("btn-stop-voice").addEventListener("click", () => runAndRefresh("/api/tts/stop"));
     $("btn-toggle-listen").addEventListener("click", () => {
       const next = !(latestState && latestState.listening_enabled);
-      api("/api/session/toggle-listen", "POST", { enabled: next })
-        .then(pollState)
-        .catch((e) => showAlert(e.message));
+      runAndRefresh("/api/session/toggle-listen", "POST", { enabled: next });
     });
     $("btn-toggle-neo").addEventListener("click", () => {
       const nextEnabled = latestState ? latestState.mode === "OFF" : true;
-      api("/api/session/toggle-neo", "POST", { enabled: nextEnabled })
-        .then(pollState)
-        .catch((e) => showAlert(e.message));
+      runAndRefresh("/api/session/toggle-neo", "POST", { enabled: nextEnabled });
     });
 
-    $("quick-mode-select").addEventListener("change", (e) => {
-      api("/api/session/mode", "POST", { mode: e.target.value })
-        .then(pollState)
-        .catch((err) => showAlert(err.message));
-    });
+    $("quick-mode-select").addEventListener("change", (e) =>
+      runAndRefresh("/api/session/mode", "POST", { mode: e.target.value })
+    );
     if ($("quick-vocal-select")) {
-      $("quick-vocal-select").addEventListener("change", (e) => {
-        api("/api/tts/mode", "POST", { vocal_mode: e.target.value })
-          .then(pollState)
-          .catch((err) => showAlert(err.message));
-      });
+      $("quick-vocal-select").addEventListener("change", (e) =>
+        runAndRefresh("/api/tts/mode", "POST", { vocal_mode: e.target.value })
+      );
     }
+
+    $("proposal-container").addEventListener("click", async (e) => {
+      const prop = latestState && latestState.active_proposal;
+      if (!prop) return;
+
+      const actionBtn = e.target?.closest?.("[data-prop-action]");
+      if (actionBtn) {
+        await runAndRefresh(`/api/session/proposals/${prop.id}/action`, "POST", {
+          action: actionBtn.dataset.propAction,
+        });
+        return;
+      }
+
+      const speakBtn = e.target?.closest?.("[data-prop-speak]");
+      if (speakBtn) {
+        const txt = prop.learner_response || prop.private_trainer_note || "";
+        await speakText(txt);
+        return;
+      }
+
+      const copyBtn = e.target?.closest?.("[data-prop-copy]");
+      if (copyBtn) {
+        const txt = prop.learner_response || prop.private_trainer_note || "";
+        try {
+          await navigator.clipboard.writeText(txt);
+          copyBtn.textContent = "Copié";
+          setTimeout(() => (copyBtn.textContent = "Copier"), 1500);
+        } catch {
+          showAlert("Copie dans le presse-papiers refusée par le navigateur.");
+        }
+      }
+    });
+
+    $("learner-broadcast-list").addEventListener("click", async (e) => {
+      const btn = e.target?.closest?.("[data-broadcast-speak]");
+      if (!btn) return;
+      const pub = (latestState && latestState.published_to_learners) || [];
+      const item = pub[Number(btn.dataset.broadcastSpeak)];
+      if (!item || !item.text) return;
+      await speakText(item.text);
+    });
 
     $("trainer-command-form").addEventListener("submit", async (e) => {
       e.preventDefault();
@@ -707,26 +692,16 @@
       const cmd = input.value.trim();
       if (!cmd) return;
       input.value = "";
-      try {
-        await api("/api/session/command", "POST", { command: cmd });
-        await pollState();
-      } catch (err) {
-        showAlert(err.message);
-      }
+      await runAndRefresh("/api/session/command", "POST", { command: cmd });
     });
 
     document.querySelectorAll(".quick-cmd").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        try {
-          await api("/api/session/command", "POST", {
-            command: btn.dataset.cmd,
-            intervention_hint: btn.dataset.hint,
-          });
-          await pollState();
-        } catch (err) {
-          showAlert(err.message);
-        }
-      });
+      btn.addEventListener("click", () =>
+        runAndRefresh("/api/session/command", "POST", {
+          command: btn.dataset.cmd,
+          intervention_hint: btn.dataset.hint,
+        })
+      );
     });
 
     // Session Context Form
@@ -751,18 +726,13 @@
 
     // Audio View
     $("btn-refresh-mics").addEventListener("click", refreshAudioView);
-    $("audio-device-select").addEventListener("change", async (e) => {
+    $("audio-device-select").addEventListener("change", (e) => {
       const val = e.target.value;
       const label = e.target.options[e.target.selectedIndex]?.text || "";
-      try {
-        await api("/api/audio/select", "POST", {
-          device_index: val === "" ? null : Number(val),
-          device_name: val === "" ? "" : label,
-        });
-        await pollState();
-      } catch (err) {
-        showAlert(err.message);
-      }
+      runAndRefresh("/api/audio/select", "POST", {
+        device_index: val === "" ? null : Number(val),
+        device_name: val === "" ? "" : label,
+      });
     });
     $("btn-test-mic").addEventListener("click", async () => {
       $("mic-test-result").textContent = "Test en cours…";
@@ -775,19 +745,14 @@
         $("mic-test-result").textContent = err.message;
       }
     });
-    $("btn-save-vad").addEventListener("click", async () => {
-      try {
-        await api("/api/settings", "PUT", {
-          vad_energy_threshold: Number($("vad-threshold").value),
-          vad_min_speech_seconds: Number($("vad-min-speech").value),
-          vad_silence_duration_seconds: Number($("vad-silence").value),
-          vad_max_segment_seconds: Number($("vad-max-seg").value),
-        });
-        await pollState();
-      } catch (err) {
-        showAlert(err.message);
-      }
-    });
+    $("btn-save-vad").addEventListener("click", () =>
+      runAndRefresh("/api/settings", "PUT", {
+        vad_energy_threshold: Number($("vad-threshold").value),
+        vad_min_speech_seconds: Number($("vad-min-speech").value),
+        vad_silence_duration_seconds: Number($("vad-silence").value),
+        vad_max_segment_seconds: Number($("vad-max-seg").value),
+      })
+    );
     $("btn-save-stt").addEventListener("click", async () => {
       try {
         const res = await api("/api/audio/stt-models/select", "POST", {
@@ -937,25 +902,20 @@
 
     // History & Diagnostics & Settings
     $("btn-clear-history").addEventListener("click", () =>
-      api("/api/session/history", "DELETE").then(pollState).catch((e) => showAlert(e.message))
+      runAndRefresh("/api/session/history", "DELETE")
     );
     $("btn-run-diag").addEventListener("click", () => runDiagnosticsView(true));
-    $("settings-form").addEventListener("submit", async (e) => {
+    $("settings-form").addEventListener("submit", (e) => {
       e.preventDefault();
-      try {
-        await api("/api/settings", "PUT", {
-          cooldown_seconds: Number($("cfg-cooldown").value),
-          max_response_chars: Number($("cfg-max-chars").value),
-          stt_timeout_seconds: Number($("cfg-stt-timeout").value),
-          privacy: {
-            keep_audio_diagnostic: $("cfg-keep-wav").checked,
-            persist_session_history: $("cfg-persist-history").checked,
-          },
-        });
-        await pollState();
-      } catch (err) {
-        showAlert(err.message);
-      }
+      runAndRefresh("/api/settings", "PUT", {
+        cooldown_seconds: Number($("cfg-cooldown").value),
+        max_response_chars: Number($("cfg-max-chars").value),
+        stt_timeout_seconds: Number($("cfg-stt-timeout").value),
+        privacy: {
+          keep_audio_diagnostic: $("cfg-keep-wav").checked,
+          persist_session_history: $("cfg-persist-history").checked,
+        },
+      });
     });
     $("btn-reset-settings").addEventListener("click", async () => {
       try {
